@@ -1,7 +1,8 @@
 # Dry Run — Architecture
 
 > Decide from **observed effects** before an agent's command touches real files.
-> Status: design approved 2026-09-22; sub-project 1 (core) is the first implementation target.
+> Status: sub-project 1 (core) implemented as v0.1 on 2026-09-23. All 16 isolation canaries pass on WSL2
+> 6.18 (`dryrun doctor`). Sub-projects 2 (benchmark) and 3 (judge model) are next.
 > Companion documents: [design spec](superpowers/specs/2026-09-22-dry-run-core-design.md) ·
 > [harm policy](harm-policy.md) · [research notes (facts)](research-notes.md) ·
 > [research program](../research/program.md) · [experiment cards](../research/cards/).

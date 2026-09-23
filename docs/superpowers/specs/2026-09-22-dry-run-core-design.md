@@ -1,7 +1,14 @@
 # Dry Run — Sub-project 1 (Core) Design Spec
 
 - **Date:** 2026-09-22 (isolation requirements added 2026-09-23)
-- **Status:** design approved in conversation section by section; this written spec is awaiting review.
+- **Status:** implemented as v0.1 (2026-09-23). Plan: `docs/superpowers/plans/2026-09-23-dry-run-core.md`.
+  Known deviations from this text:
+  1. **Scratch `$HOME` replaced.** It became a read-only real home with throwaway cache overlays (S11, spike 0).
+  2. **H5 uses canary tokens instead of fanotify.**
+  3. **CPU/IO** use `nice`/`ionice` rather than cgroup weights.
+  4. **Seccomp** uses a socket-*family allowlist* (AF_INET, AF_INET6, AF_NETLINK) that also blocks AF_VSOCK.
+  5. **N2 (≤ 1.5×)** is not met for short commands on large repos. The fixed pipeline cost is about
+     0.5 s per shadowed command on a 20k-file repo (card C-0003); see `research/memory/ledger.jsonl`.
 - **Architecture & diagrams:** [docs/ARCHITECTURE.md](../../ARCHITECTURE.md)
 - **Harm policy:** [docs/harm-policy.md](../../harm-policy.md)
 - **Research facts:** [docs/research-notes.md](../../research-notes.md) · **Research loop:** [research/program.md](../../../research/program.md), [cards](../../../research/cards/)

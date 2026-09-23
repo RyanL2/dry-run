@@ -121,3 +121,26 @@ question that it might answer (research loop rule L6).
 | C-0007 GRPO | Dr. GRPO [2503.20783](https://arxiv.org/abs/2503.20783); DAPO [2503.14476](https://arxiv.org/abs/2503.14476); Balance-GRPO in StepGuard [2608.24777](https://arxiv.org/abs/2608.24777); overconfidence after RL [2601.13284](https://arxiv.org/abs/2601.13284) |
 | C-0008 attacker LoRA | ABS [2605.08427](https://arxiv.org/abs/2605.08427); Self-RedTeam [2506.07468](https://arxiv.org/abs/2506.07468); ShellForge [2607.07191](https://arxiv.org/abs/2607.07191) |
 | Benchmark design (sub-project 2 spec) | matched twins: StepGuard [2608.24777](https://arxiv.org/abs/2608.24777), AuraGen [2510.09781](https://arxiv.org/abs/2510.09781); held-out generators RoSE [2510.06143](https://arxiv.org/abs/2510.06143); label verification BARRED [2604.25203](https://arxiv.org/abs/2604.25203); multi-turn MT-AgentRisk [2602.13379](https://arxiv.org/abs/2602.13379); external sets OverEager-Gen [2605.18583](https://arxiv.org/abs/2605.18583), SABER [2606.01317](https://arxiv.org/abs/2606.01317), RedCode (CC BY 4.0 data), NL2Bash (MIT data), Atomic Red Team (MIT); error bars [2411.00640](https://arxiv.org/abs/2411.00640); baselines AgentDoG-1.5 [2605.29801](https://arxiv.org/abs/2605.29801), Qwen3Guard-Gen-0.6B, CARE |
+
+## 5. Measured on the v0.1 implementation (2026-09-23, WSL2 6.18, 12 vCPU)
+
+Raw rows are in `research/memory/ledger.jsonl`.
+
+- **N1: hook latency on non-shadowed commands** (read-only and non-shadowable, including Python
+  start-up): p50 **87 ms**, p95 **101 ms** over 250 calls. Target p50 < 300 ms and p95 < 500 ms: **met**.
+- **C-0003: short commands on a 20k-file git repo** (30 commands, median native 3 ms):
+  - median added latency **566 ms**;
+  - fixed stages make up **87%** of it (prepare 211 ms, post-run 270 ms), the sandboxed run only 82 ms.
+  - The N2 ratio target (≤ 1.5×) is **not met** for millisecond commands, and a ratio is the wrong metric
+    for them. Follow-up cards C-0009 to C-0011 separate three causes: fingerprint walks, sandboxed git
+    queries, and the `/tmp` copy.
+- **Background `git gc --auto` races the shadow.** Committing 20k files started a detached auto-gc that
+  repacked loose objects while a later command was being shadowed. The real worktree was untouched, but
+  the lower layer changed mid-run, and `lower_changed` exists to catch exactly that (ask + rerun). In real
+  sessions this will cause occasional false asks right after large commits. Worth counting in the decision
+  log.
+- **Fidelity:** 22 named scenarios and about 100 hypothesis-generated operation sequences produced the
+  same tree as a real run.
+  - Checked: content, type, mode and symlink target, plus the reviewed mtime on committed files.
+  - `.git/index` is compared semantically, because it caches device/inode numbers.
+  - One real bug was found and fixed: a file replaced by a directory was wrongly treated as a conflict.

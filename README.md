@@ -8,8 +8,11 @@ Dry Run records what the command actually did and judges that effect against wha
 it allows, asks or denies. On allow, it commits exactly the reviewed change instead of re-running the
 command.
 
-**Status:** design phase. Nothing is implemented yet. Read these first:
+**Status:** v0.1: the core (sub-project 1) is implemented and tested on WSL2. That covers the shadow
+sandbox with 16 isolation canaries, effect extraction, harm-policy rules, and confined journaled commit.
+The benchmark (sub-project 2) and the judge model (sub-project 3) are next.
 
+- [Install guide](docs/INSTALL.md)
 - [Architecture (with diagrams)](docs/ARCHITECTURE.md)
 - [Sub-project 1 design spec](docs/superpowers/specs/2026-09-22-dry-run-core-design.md)
 - [Harm policy](docs/harm-policy.md)
