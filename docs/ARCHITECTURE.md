@@ -1,0 +1,396 @@
+# Dry Run — Architecture
+
+> Decide from **observed effects** before an agent's command touches real files.
+> Status: design approved 2026-09-22; sub-project 1 (core) is the first implementation target.
+> Companion documents: [design spec](superpowers/specs/2026-09-22-dry-run-core-design.md) ·
+> [harm policy](harm-policy.md) · [research notes & improvement backlog](research-notes.md).
+
+---
+
+## 1. What Dry Run is, in one picture
+
+Current guards judge the command **text** (regexes, bashlex rule banks such as CARE) or ask a frontier
+model for an opinion about the text (Claude Code auto mode). Bash rewrites text before it runs, so
+indirection — `bash script.sh`, `python -c 'shutil.rmtree(p)'`, `find -delete`, `V=-rf; rm $V p`,
+`base64 -d | sh` — defeats string-level inspection (GuardFall, anthropics/claude-code#85274,
+ShellSieve).
+
+Dry Run runs the command first in a **copy-on-write shadow of the workspace with no network**, records
+what it **actually did**, judges that effect against **what the user asked for**, and on allow
+**commits exactly the reviewed diff** instead of re-running the command.
+
+```mermaid
+flowchart LR
+    U([User request]) --> CC[Claude Code]
+    CC -- "Bash tool call" --> H{{"dryrun-hook<br/>(PreToolUse)"}}
+    H -- "RPC, deadline" --> D[dryrund]
+    D --> T[Static triage]
+    T -- "read-only" --> A1[allow, run as-is]
+    T -- "not shadowable" --> TX["text rules<br/>default ask"]
+    T -- "everything else" --> S["Shadow run<br/>overlay + no net"]
+    S --> E[Effect record]
+    E --> J["Judge<br/>rules, then model"]
+    J -- allow --> C["updatedInput =<br/>dryrun apply id"]
+    J -- ask --> P[Permission prompt with diff]
+    J -- deny --> X[Block with reason]
+    C --> FS[(Real workspace)]
+```
+
+The novelty claim (see [research notes §1](research-notes.md) for positioning against YoloFS, Cordon,
+pi-overlayfs and CARE): the combination of **(a)** execution in a shadow before commit, **(b)** a judge
+over the *observed effect*, **(c)** consent scope from the user's request, and **(d)** committing the
+reviewed diff rather than re-executing. No surveyed system combines all four.
+
+---
+
+## 2. Program structure: three sub-projects, shared contracts
+
+```mermaid
+flowchart TB
+    subgraph SP1["Sub-project 1 — Core (this spec)"]
+        HK[hook client] --> DM[daemon]
+        DM --> SB[sandbox runner]
+        SB --> EF[effects: upper dir to ChangeSet and EffectRecord]
+        EF --> RJ[rules judge]
+        RJ --> CM[commit / apply]
+    end
+    subgraph SP2["Sub-project 2 — Benchmark"]
+        GEN[synthetic repos + LLM agent tasks] --> HAR[container execution harness]
+        HAR --> LAB[policy labeller]
+        LAB --> DS[(dataset, held-out splits)]
+        DS --> BL[baselines: regex, CARE, frontier judge, AgentDoG, Qwen3Guard]
+    end
+    subgraph SP3["Sub-project 3 — Judge model"]
+        SFT[cost-weighted SFT] --> CAL["temperature scaling +<br/>Learn-then-Test thresholds"]
+        CAL --> GG[optional Dr.GRPO / Balance-GRPO]
+    end
+    EF -. "dryrun.effect/1 schema" .-> HAR
+    SB -. "same runner, inside disposable containers" .-> HAR
+    DS --> SFT
+    CAL -. "EffectJudge interface" .-> RJ
+    DM -. "local decision log, no telemetry" .-> CAL
+```
+
+The **contracts** — `dryrun.effect/1`, `dryrun.changeset/1`, `dryrun.rpc/1` (JSON Schemas in
+`schemas/`), and the `EffectJudge` interface — are fixed in sub-project 1. The benchmark measures
+effects with the *same* sandbox runner and effect extractor, so what the model trains on is exactly
+what it sees in deployment.
+
+---
+
+## 3. Components (sub-project 1)
+
+```mermaid
+flowchart LR
+    subgraph Client["Hook process: short-lived, stdlib only"]
+        HP["dryrun-hook prompt"]
+        HT["dryrun-hook pretool"]
+    end
+    subgraph Daemon["dryrund: long-lived, asyncio, unix socket"]
+        RPC[rpc server] --> TR[triage]
+        TR --> SR[sandbox runner]
+        SR --> FX[effects extractor]
+        FX --> GS[git state]
+        FX --> JU[judge cascade]
+        JU --> RU[rules + policy.yaml]
+        JU --> MS["model slot<br/>NullJudge in v1"]
+        RPC --> ST[store]
+        ST --> SES[sessions: latest request, ledger]
+        ST --> RUNS[runs: upper dirs, records, tokens]
+        ST --> LOG[decision log]
+    end
+    subgraph CLI["dryrun CLI"]
+        AP["apply id --token t"]
+        RC[recover]
+        IN[install / doctor]
+    end
+    HP --> RPC
+    HT --> RPC
+    AP --> RUNS
+    AP --> CMT[commit engine: fingerprint check, journal, rename, verify]
+    RC --> CMT
+```
+
+| Unit | One job | Depends on | Consumers |
+|---|---|---|---|
+| `hook` | Translate Claude Code hook JSON ⇄ RPC; **any fault → `ask`** | stdlib only | Claude Code |
+| `rpc` | NDJSON over `$XDG_RUNTIME_DIR/dryrun.sock`, per-request deadline | asyncio | hook |
+| `triage` | Parse with tree-sitter-bash; classify `read_only` / `apply` / `non_shadowable` / `long_running` / `shadow` | tree-sitter-bash | daemon |
+| `sandbox` | Build and run the bwrap invocation; collect raw artifacts | vendored bwrap ≥ 0.11.1, strace | effects |
+| `fingerprint` | Stat-walk `(ino,size,mtime_ns,ctime_ns,mode)`; racy-mtime hashing | os | sandbox, commit |
+| `effects` | Upper dir → `ChangeSet` (noise-filtered) + `EffectRecord` | fingerprint, gitstate | judge, commit |
+| `gitstate` | Per-path recoverability (`tracked_clean`/`tracked_dirty`/`untracked`/`ignored`), ref snapshot | git CLI | effects |
+| `judge` | Cascade: hard rules → soft rules → model slot; one templated reason | policy.yaml | daemon |
+| `commit` | Verify base fingerprints, journal, apply via `rename(2)`, fsync, verify, replay output | fingerprint | `dryrun apply`, `recover` |
+| `store` | Sessions, session ledger, run dirs, single-use tokens, TTL cleanup, local decision log | fs | all |
+
+---
+
+## 4. The decision cascade
+
+```mermaid
+flowchart TD
+    IN[pretool request] --> TA{triage class}
+    TA -- read_only --> R1["allow + passthrough"]
+    TA -- "apply typed by agent" --> R2["deny: only Dry Run may issue apply"]
+    TA -- non_shadowable --> TXR{text rules}
+    TXR --> R3["ask + passthrough<br/>never allow in v1"]
+    TA -- long_running --> LR{"dev-server<br/>allowlist?"}
+    LR -- yes --> R4["allow + rerun, logged"]
+    LR -- no --> R5[ask + passthrough]
+    TA -- shadow --> SH[shadow run]
+    SH --> FL{"flags?<br/>timeout, unsupported entry,<br/>network attempt, lower changed"}
+    FL -- yes --> R6["ask + rerun of original command"]
+    FL -- no --> HR{hard rule fired?}
+    HR -- deny --> R7[deny]
+    HR -- "ask / none" --> HM{"non-cache<br/>home diff?"}
+    HM -- yes --> R8["ask + rerun"]
+    HM -- no --> HA{hard ask?}
+    HA -- yes --> R9["ask + commit<br/>user sees diff + 'dryrun apply id'"]
+    HA -- no --> SR{"soft rules,<br/>then model"}
+    SR -- ask --> R9
+    SR -- allow --> R10["allow + commit"]
+```
+
+When the user approves an `ask + commit`, what gets applied is the **reviewed ChangeSet**, not a fresh
+run of the command. `rerun` is used only when the ChangeSet can't represent the effect: home changes,
+flags such as incomplete network or unsupported entries, and long-running processes.
+
+Invariants:
+
+1. **Fail to ask.** Every error, timeout, parse failure, missing daemon or unexpected upper-dir entry
+   ends in `ask`. Claude Code lets a failed or timed-out hook *through*, so the hook client enforces this
+   itself.
+2. **The model can only move soft decisions.** A hard-rule verdict is final. In sub-project 3 the model
+   can raise any decision and can lower a *soft* `ask` to `allow` only above its calibrated threshold.
+3. **Commit what was reviewed.** `commit` mode never re-executes the command. `rerun` is reserved for
+   cases the shadow cannot capture faithfully, and is always logged.
+
+---
+
+## 5. Happy path: allow and commit
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CC as Claude Code
+    participant HK as dryrun-hook
+    participant D as dryrund
+    participant SB as bwrap shadow
+    participant FS as real workspace
+    CC->>HK: UserPromptSubmit {session_id, prompt}
+    HK->>D: prompt(session_id, text)
+    CC->>HK: PreToolUse Bash {command, cwd, session_id}
+    HK->>D: pretool(..., deadline_ms)
+    D->>D: triage → shadow
+    D->>FS: fingerprint base (stat walk), git status
+    D->>SB: run command in overlays of workspace, /tmp, scratch HOME, with no net
+    SB-->>D: upper dirs, exit code, stdout/stderr, strace log
+    D->>FS: re-fingerprint (lower unchanged?)
+    D->>D: effects → ChangeSet + EffectRecord → judge = allow
+    D-->>HK: allow, commit, run_id, token
+    HK-->>CC: permissionDecision allow, updatedInput.command = dryrun apply id --token t
+    CC->>FS: runs dryrun apply
+    Note over FS: check target fingerprints → journal → rename upper entries → fsync → verify
+    FS-->>CC: replayed stdout/stderr + original exit code
+```
+
+## 6. Failure path: daemon down or slow
+
+```mermaid
+sequenceDiagram
+    participant CC as Claude Code
+    participant HK as dryrun-hook
+    participant D as dryrund
+    CC->>HK: PreToolUse Bash
+    HK->>D: connect
+    alt socket missing or refused
+        HK-->>CC: ask - Dry Run unavailable, review manually
+    else deadline reached, hook timeout minus 2 s
+        HK-->>CC: ask - Dry Run could not finish in time
+    else malformed reply or any exception
+        HK-->>CC: ask - Dry Run error
+    end
+    Note over HK,CC: always exit 0 with valid JSON. A crashed hook would let the call through.
+```
+
+---
+
+## 7. Shadow sandbox layout
+
+```mermaid
+flowchart TB
+    subgraph CG["systemd --user scope: MemoryMax, MemorySwapMax=0, TasksMax, low CPUWeight/IOWeight"]
+    subgraph NS["bwrap: new user, mount, pid, net, ipc, uts, cgroup namespaces; cap-drop ALL; no_new_privs; new session; die-with-parent"]
+        ROOT["/ : recursive read-only bind of host root<br/>(covers /mnt/c, /usr/lib/wsl; verified by canary)"]
+        WS["$WORKSPACE : overlay<br/>lower = real workspace<br/>upper = runs/id/ws.up on the SAME fs"]
+        TMP["/tmp : overlay<br/>lower = real /tmp, upper = runs/id/tmp.up"]
+        HIDE["tmpfs over: /run, /var/run, /mnt/wslg, /mnt/wsl, /tmp/.X11-unix,<br/>$XDG_RUNTIME_DIR, Dry Run state dir, ~/.claude"]
+        HOMEX["rest of real $HOME : visible read-only"]
+        SHOME["$HOME=/home/sbx : overlay<br/>lower = template (gitconfig, npmrc minus tokens)"]
+        SEC["~/.ssh ~/.aws ~/.config/gh ~/.netrc ~/.docker ~/.kube ~/.gnupg … :<br/>read-only bind of a host decoy dir (fanotify-watched)"]
+        DEV["/dev : minimal (null, zero, urandom, tty, pts); /proc : new, pid-ns scoped"]
+        SC["seccomp: no AF_UNIX sockets, no io_uring, keyctl, bpf, ptrace,<br/>perf, userfaultfd, mount, setns, new userns, TIOCSTI"]
+        NET["network: loopback only"]
+        TR["strace --seccomp-bpf: execve, connect, sendto, sendmsg"]
+    end
+    end
+    WD["daemon watchdogs: wall clock, disk budget + free-space floor"] -. "SIGKILL whole scope" .-> CG
+    CMD["sh -c command, filtered env"] --> NS
+    NS --> ART["artifacts: upper dirs, exit, output tails, trace"]
+```
+
+### 7.1 Isolation: the shadow must not affect the real system (CRITICAL)
+
+**Threat model.** Treat the shadowed command as hostile. It may be an obfuscated `rm -rf ~`, a fork
+bomb, a disk filler, or a script that tries to reach host services. The one thing the shadow may
+change is its own upper directories. Real change happens only later, through a reviewed commit that is
+confined to the workspace (and `/tmp`).
+
+Every channel a process can use to affect the host has a mechanism that closes it, and a **canary** test
+that proves it is closed:
+
+| # | Channel to the real system | Mechanism | Canary (must fail inside the shadow) |
+|---|---|---|---|
+| I1 | Filesystem writes | Recursive read-only bind of `/`. Writable only: overlay uppers for the workspace, `/tmp` and scratch `$HOME`, plus tmpfs mounts | write to `/`, real `$HOME`, `/mnt/c`, `/usr/lib/wsl`, and the real `/tmp` path behind the overlay |
+| I2 | Unix-socket services (docker, D-Bus, systemd, snapd, udev, journal, X11/WSLg, ssh-agent, **dryrund itself**) | tmpfs over `/run`, `/var/run`, `$XDG_RUNTIME_DIR`, `/mnt/wslg`, `/tmp/.X11-unix`; **seccomp denies `socket(AF_UNIX)`** (`socketpair` stays allowed) | connect to a canary socket the daemon listens on in the real `/tmp` |
+| I3 | Network | Empty network namespace. Abstract unix sockets are per network namespace, so they are isolated too | TCP to 1.1.1.1:443, a DNS lookup, an abstract-socket connect |
+| I4 | Host processes (signals, ptrace, `/proc`) | PID namespace; new `/proc`; seccomp denies ptrace and `process_vm_writev` | `kill` a canary host process by its PID |
+| I5 | IPC (SysV/POSIX shm, message queues) | IPC namespace; private `/dev/shm` | attach to a canary shm segment |
+| I6 | Devices | Minimal `/dev`, no block devices; `--new-session` and a seccomp rule block `TIOCSTI` terminal injection | open `/dev/sda`, run `TIOCSTI` |
+| I7 | Kernel-wide state (keyrings, io_uring, bpf, perf, modules, mounts, time) | `cap-drop ALL`, `no_new_privs`, seccomp denylist (Docker default profile plus `io_uring_*`, since io_uring can create sockets without passing the `socket()` filter) | `keyctl`, `io_uring_setup`, `bpf` |
+| I8 | Memory, which could OOM-kill the user's processes | cgroup `MemoryMax` (default 2 GiB), `MemorySwapMax=0`, `oom_score_adj=1000` | allocate past the limit; a canary host process survives |
+| I9 | Process count (fork bomb) | cgroup `TasksMax` (default 512). `RLIMIT_NPROC` alone is shared with the user's real processes, so it is not used alone | fork bomb is contained; host `fork()` still works |
+| I10 | CPU and IO starvation | cgroup `CPUWeight=20`, `IOWeight=20`; wall-clock limit (default 30 s), then SIGKILL of the whole scope | busy loop; host latency probe stays within bounds |
+| I11 | Disk fill (uppers share the real filesystem) | `RLIMIT_FSIZE` (1 GiB per file); daemon watchdog polls `statvfs` every 50 ms and kills the scope when upper growth exceeds the budget (default 2 GiB) **or** free space would fall below max(5 GiB, 10%); uppers deleted after the decision | `dd` of 3 GiB, killed with the free-space floor intact |
+| I12 | WSL interop (launching Windows `.exe`s) | `/run/WSL` hidden, `WSL_INTEROP` cleared, AF_UNIX denied | run `cmd.exe /c echo` |
+| I13 | Dry Run's own state (tokens, other runs' uppers, journals) | tmpfs over the state dir and `$XDG_RUNTIME_DIR`; state dir mode 0700 | read another run's token |
+| I14 | Secrets leaking into shadow output that the agent sees | Read-only bind of a host decoy dir over secret paths (reads watched by fanotify, see H5); env filtered by a denylist (`*TOKEN*`, `*SECRET*`, `*KEY*`, `AWS_*` …) | `cat ~/.ssh/id_ed25519` returns the decoy |
+| I15 | Processes surviving the shadow (daemons, `nohup`, double fork) | PID-namespace init death kills everything; cgroup kill as a backstop | a `setsid nohup sleep` is gone after the run |
+
+**Fail-closed rules**
+
+1. **A user command never runs outside the sandbox on the shadow path.** Exactly one function
+   (`sandbox.spawn`) starts user commands. It always builds the bwrap argv and refuses to start if
+   `bwrap` version, seccomp load, user namespaces, cgroup scope creation or the overlay mount fail. A
+   test enforces that nothing else spawns user commands.
+2. **Canary gate.** `dryrun doctor` runs the full I1–I15 canary suite. The daemon runs it at startup and
+   every 6 hours. **If any canary gets through, shadowing is disabled.** Every Bash call then returns
+   `ask` with the reason "isolation self-test failed", until the problem is fixed.
+3. **Missing cgroup delegation is not quietly downgraded.** If `systemd-run --user` is unavailable,
+   the default `require_cgroup: true` makes the daemon return `ask` for every command instead of
+   shadowing with weaker limits.
+4. **Commit confinement (the one intended real effect).** `apply` resolves every target with
+   `O_NOFOLLOW` directory-fd walks from the workspace root (`*at()` syscalls, `renameat2`). It refuses
+   symlinks in intermediate components, any `..`, and any path outside the workspace or `/tmp`. A
+   directory swapped for a symlink between shadow and commit cannot redirect a write.
+5. **Commit never runs code.** It does not run git or hooks, only renames, mkdirs, unlinks and chmods.
+   Changes that *would* run code later on the real system — `.git/hooks/*`, `.git/config`,
+   `.gitattributes` filters, `.claude/**`, `.mcp.json`, `.envrc`, `.husky/*` — are covered by policy
+   clause **H9** and always require `ask`.
+
+**Residual risk, stated honestly.** Kernel vulnerabilities in user namespaces or overlayfs could still
+let a hostile command escape. The seccomp denylist shrinks that attack surface but cannot remove it. An
+optional gVisor (`runsc`) backend for extra hardening is on the backlog (research notes §4).
+
+Measured on the dev box (WSL2 6.18, ext4): overlay mount and startup ≈ 7 ms; a worst-case write-heavy
+workload runs at ≈ 1.65× native; the strace filter adds ≈ 3%; walking an upper dir with 22k entries takes
+16 ms; fingerprinting 20k files takes 55 ms. The 1.65× worst case exceeds the brief's 1.5× target. See
+[research notes §4](research-notes.md) for mitigations and for how the overhead will be reported.
+
+**Upper dir → ChangeSet rules** (unprivileged overlay: `userxattr`, `redirect_dir=nofollow`,
+`metacopy=off`, no `index`):
+
+| Upper entry | Meaning | ChangeSet op |
+|---|---|---|
+| char dev 0/0, or zero-size file with `user.overlay.whiteout` | deleted | `unlink` / `rmtree` |
+| dir with `user.overlay.opaque=y` | dir replaced | `rmtree` lower dir, then `mkdir` + children |
+| entry with `user.overlay.origin` whose content, mode and mtime equal lower | no-op copy-up (chmod, touch, open O_RDWR) | **dropped** |
+| entry with `user.overlay.origin` that differs | modified (`preexisting=true`) | `rename_in` / `chmod` |
+| entry without origin | created (`preexisting=false`) | `mkdir` / `rename_in` / `symlink` |
+| hard link, device, socket, setuid/setgid, fifo | unsupported | refused, forces `ask + rerun` |
+
+---
+
+## 8. Run lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Created: pretool(shadow)
+    Created --> Shadowing
+    Shadowing --> Discarded: lower changed / sandbox error
+    Shadowing --> Judged
+    Judged --> Authorized: allow + commit (token issued)
+    Judged --> PendingApproval: ask + commit (token issued)
+    Judged --> Denied
+    Judged --> RerunAuthorized: ask/allow + rerun
+    Authorized --> Committed: dryrun apply ok
+    PendingApproval --> Committed: user approved, apply ok
+    Authorized --> Conflict: target fingerprint changed
+    PendingApproval --> Expired: TTL / user rejected
+    Conflict --> [*]
+    Committed --> [*]: created paths added to session ledger
+    Denied --> [*]
+    Expired --> [*]
+    Discarded --> [*]
+    RerunAuthorized --> [*]
+```
+
+## 9. Commit engine
+
+```mermaid
+flowchart TD
+    A["dryrun apply id --token t"] --> B{"token valid,<br/>single use, run Authorized/Pending?"}
+    B -- no --> Z1[exit 3: refused, nothing written]
+    B -- yes --> C{"every target fingerprint<br/>== base fingerprint?"}
+    C -- no --> Z2[exit 4: conflict, nothing written]
+    C -- yes --> D["write journal (WAL) + fsync"]
+    D --> E[deletes, deepest first]
+    E --> F[mkdir new dirs]
+    F --> G["rename(upper entry → target)<br/>RENAME_NOREPLACE for creates"]
+    G --> H[chmod-only ops]
+    H --> I[fsync files + parent dirs]
+    I --> J{"verify: type, mode, size;<br/>hash if < 64 MB"}
+    J -- mismatch --> Z3[log FIDELITY_ERROR loudly, exit 5]
+    J -- ok --> K[mark journal done; update session ledger]
+    K --> L[replay stdout/stderr; exit with shadow exit code]
+```
+
+`dryrund` startup replays any journal that is not marked done. Every step is idempotent: re-running an
+already-applied rename finds the target in its final state and skips it.
+
+---
+
+## 10. Security invariants (tested)
+
+1. **The shadow does not affect the real system.** This covers the filesystem, sockets, network,
+   processes, IPC, devices, kernel state, memory, process count, CPU/IO and disk. §7.1 lists each
+   channel with its mechanism and canary (I1–I15). A failed canary disables shadowing, and every call
+   then returns `ask`.
+2. On the shadow path, a user command never runs outside the sandbox. Any setup failure means `ask`,
+   not an unsandboxed run.
+3. The only intended real effect is a commit of a reviewed ChangeSet, confined to the workspace and
+   `/tmp` with no-symlink-follow path resolution. The commit never runs code.
+4. Changes that would run code later (git hooks and config, `.claude/**`, `.envrc` …) always require
+   `ask` (H9).
+5. The agent cannot commit a run itself. An agent-typed `dryrun apply` is denied, and tokens are
+   single-use and bound to a session and run.
+6. No telemetry. The decision log stays in the local state directory.
+7. The adversarial corpus runs only inside disposable containers (sub-project 2), never on the
+   development machine. The core's own tests use harmless targets inside temporary fixture
+   directories.
+8. The read-only fast path, which runs *without* a shadow, uses an **allowlist of commands and flags**,
+   not a denylist. For example `sort -o`, `rg --pre`, `git -c`, `git diff --ext-diff`, `find`, `less`
+   and any redirect or substitution are all excluded. Anything the allowlist doesn't cover goes to the
+   shadow.
+
+## 11. Known limits (stated in the README)
+
+- Linux and WSL2 only; workspaces must be on a local Linux filesystem (ext4, xfs or btrfs), not `/mnt/c`.
+- Commands with effects that leave the machine cannot be shadowed. They fall back to text rules and
+  `ask`, and their share of real-session commands is reported as the ceiling on the approach.
+- Overlay semantics that cannot be committed faithfully (hard links, directory renames under EXDEV,
+  special files) resolve to `ask + rerun`.
+- In `rerun` mode the real run can differ from the shadow. A post-run divergence audit is planned for
+  v1.1 ([research notes §3](research-notes.md)).
+- Defense in depth, not a guarantee. Keep backups and use OS sandboxing.
