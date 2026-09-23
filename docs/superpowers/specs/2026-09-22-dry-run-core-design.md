@@ -55,7 +55,7 @@ Build a local gate for Claude Code's Bash tool. Before a command runs for real, 
 | F1 | `dryrun-hook prompt` stores `{session_id → latest prompt text}` in the daemon. It never blocks the prompt: on error it exits 0 with no output. |
 | F2 | `dryrun-hook pretool` sends `{session_id, cwd, command, description, transcript_path, env (filtered), deadline_ms}` and prints a valid `hookSpecificOutput` JSON on stdout. It always exits 0. |
 | F3 | Triage sorts commands into `read_only`, `apply`, `non_shadowable`, `long_running` or `shadow` (details in §4). A command that can't be parsed goes to `shadow`. |
-| F4 | Shadow run, following the layout in ARCHITECTURE §7. Captures: exit code, wall time, stdout/stderr (full output kept for replay, a 4 KiB tail in the record), upper dirs, the strace log (execve/connect/sendto/sendmsg) and decoy reads. |
+| F4 | Shadow run, following the layout in ARCHITECTURE §7. Captures: exit code, wall time, stdout/stderr (full output kept for replay, a 4 KiB tail in the record), upper dirs, the strace log (execve/connect/sendto/sendmsg, with strace running outside bwrap) and canary-token hits from the decoys. |
 | F5 | The effects extractor produces a `ChangeSet` (`dryrun.changeset/1`) and an `EffectRecord` (`dryrun.effect/1`). It follows the upper-dir rules table in ARCHITECTURE §7, filters out copy-ups that changed nothing, and handles both whiteout forms. |
 | F6 | Git state: per-path recoverability and a before/after snapshot of refs (`git for-each-ref`, HEAD, stash list). Runs only when the workspace is a git repo. |
 | F7 | The rules judge implements harm-policy clauses H1–H10 and T0–T6, as hard or soft tiers. It returns a verdict, the fired rule IDs with evidence, and a reason of at most 200 characters built from a template. |
@@ -68,6 +68,7 @@ Build a local gate for Claude Code's Bash tool. Before a command runs for real, 
 | F14 | `dryrun install` adds the hook entries (§6) to `~/.claude/settings.json` after showing a diff and getting confirmation. It also sets up the systemd user service for `dryrund`. `--uninstall` reverses both. |
 | F15 | Local decision log: an append-only JSONL of `{ts, session_id, run_id, triage, record, verdict, mode, rule_ids, latency_ms}` in the state dir, with size-based rotation. No network I/O at all. |
 | F16 | Run dirs are deleted once the decision is final. Pending runs expire after a TTL (default 15 min). |
+| F17 | `dryrund` refuses to start as root (uid 0) unless `--allow-root` is given. Development and tests run as a dedicated non-root user (`scripts/dev/setup-wsl-user.sh`). |
 
 ### 3.2 Isolation (CRITICAL)
 
@@ -83,6 +84,9 @@ The shadow must not affect the real system. Treat every shadowed command as host
 | S6 | The daemon writes only inside its state dir (mode 0700) and, during commit, only inside the confined targets. Run-dir cleanup uses fd-relative deletes, and refuses to follow symlinks or leave the state dir. |
 | S7 | The disk watchdog kills the scope when upper growth exceeds `disk_budget` (default 2 GiB) or when free space would fall below `max(5 GiB, 10%)`. It polls every ≤ 50 ms. |
 | S8 | Env passed into the shadow is the hook-supplied env, minus a secret denylist and minus `WSL_INTEROP`, `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`, `DISPLAY`, `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR`. |
+| S9 | Shadow `/tmp`: an overlay whose lower dir is a fresh **copy** of the real `/tmp`, holding only own-uid regular files, dirs and symlinks, capped at 2,000 entries, 64 MiB total and 16 MiB per file (flag `tmp_partial` when capped). Never hard links: the real files' nlink and ctime must not change. A workspace containing a mount point cannot be the lower layer, so the result is `sandbox_error` → `ask` (spike 0). |
+| S10 | Dry Run never runs repository-controlled code outside the sandbox. Its own git queries (`status`, `ls-files`, `ls-tree`, `merge-base`) run through `sandbox.run_readonly`: bwrap, read-only root, no network, seccomp, with `GIT_OPTIONAL_LOCKS=0`. |
+| S11 | Real `$HOME` is read-only in the shadow and `$HOME` is unchanged. Existing `home_cache_dirs` get throwaway overlays. Writes elsewhere fail with EROFS; stderr matching EROFS sets `ro_write_blocked`. Workspaces equal to `$HOME` or `/`, or containing the state dir, are refused (`ask`). |
 
 ### 3.3 Non-functional
 
@@ -136,13 +140,13 @@ design section 2; the examples in ARCHITECTURE show their shape. Summary:
   - `request{text, source}`
   - `triage{class, reason}`
   - `exec{exit_code, wall_ms, timed_out, stdout_tail, stderr_tail}`
-  - `fs{workspace[], home[], tmp[]}` — each entry is `{op, path, kind, preexisting, in_ledger, git, build_output, bytes_before, bytes_after, mode_before, mode_after}`
+  - `fs{workspace[], tmp[], home_cache{files, bytes}}` — each entry is `{op, path, kind, preexisting, in_ledger, git, build_output, bytes_before, bytes_after, mode_before, mode_after}`
   - `git{refs_changed[], index_changed, internals_touched[]}`
   - `summary{…counts}`
   - `net[]{kind, target}`
   - `procs{count, exec[]}`
-  - `decoy_reads[]`
-  - `flags[]`, drawn from `timeout`, `resource_limit`, `incomplete_network`, `unsupported_entry`, `lower_changed`, `sandbox_error`
+  - `decoy_hits[]{path, where}`
+  - `flags[]`, drawn from `timeout`, `resource_limit`, `incomplete_network`, `unsupported_entry`, `lower_changed`, `sandbox_error`, `ro_write_blocked`, `tmp_partial`
 - **`dryrun.changeset/1`:**
   - `run_id`, `workspace_root`
   - `base_digest`
@@ -181,8 +185,9 @@ shadow:
   wall_clock_s: 30
   memory_max: 2G
   tasks_max: 512
-  cpu_weight: 20
-  io_weight: 20
+  nice: 19
+  ionice_class: idle   # WSL delegates only memory+pids cgroup controllers (spike 0)
+  tmp_snapshot: {max_entries: 2000, max_total: 64M, max_file: 16M}
   file_size_max: 1G
   disk_budget: 2G
   free_space_floor: {abs: 5G, frac: 0.10}
@@ -213,7 +218,7 @@ Safety of the tests themselves: destructive operations target only `tmp_path` fi
 isolation canaries target only canary resources that the test creates. The GuardFall-style adversarial
 corpus is **not** executed in sub-project 1 tests. Triage tests only *parse* those strings.
 
-## 9. Spike 0 (first plan task): verify before building on it
+## 9. Spike 0: verify before building on it (DONE 2026-09-23, see [spike0-results.md](../../spike0-results.md))
 
 1. Does Claude Code re-run PreToolUse hooks on `updatedInput`? Does the user see the rewritten command
    in the `ask` prompt?

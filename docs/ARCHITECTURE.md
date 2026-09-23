@@ -147,13 +147,11 @@ flowchart TD
     LR -- yes --> R4["allow + rerun, logged"]
     LR -- no --> R5[ask + passthrough]
     TA -- shadow --> SH[shadow run]
-    SH --> FL{"flags?<br/>timeout, unsupported entry,<br/>network attempt, lower changed"}
+    SH --> HD{hard deny fired?}
+    HD -- yes --> R7[deny]
+    HD -- no --> FL{"flags?<br/>timeout, resource limit, unsupported entry,<br/>network attempt, lower changed, ro_write_blocked"}
     FL -- yes --> R6["ask + rerun of original command"]
-    FL -- no --> HR{hard rule fired?}
-    HR -- deny --> R7[deny]
-    HR -- "ask / none" --> HM{"non-cache<br/>home diff?"}
-    HM -- yes --> R8["ask + rerun"]
-    HM -- no --> HA{hard ask?}
+    FL -- no --> HA{hard ask?}
     HA -- yes --> R9["ask + commit<br/>user sees diff + 'dryrun apply id'"]
     HA -- no --> SR{"soft rules,<br/>then model"}
     SR -- ask --> R9
@@ -228,15 +226,15 @@ sequenceDiagram
 
 ```mermaid
 flowchart TB
-    subgraph CG["systemd --user scope: MemoryMax, MemorySwapMax=0, TasksMax, low CPUWeight/IOWeight"]
+    subgraph CG["systemd --user scope: MemoryMax, MemorySwapMax=0, TasksMax; nice 19 + ionice idle"]
     subgraph NS["bwrap: new user, mount, pid, net, ipc, uts, cgroup namespaces; cap-drop ALL; no_new_privs; new session; die-with-parent"]
         ROOT["/ : recursive read-only bind of host root<br/>(covers /mnt/c, /usr/lib/wsl; verified by canary)"]
         WS["$WORKSPACE : overlay<br/>lower = real workspace<br/>upper = runs/id/ws.up on the SAME fs"]
-        TMP["/tmp : overlay<br/>lower = real /tmp, upper = runs/id/tmp.up"]
+        TMP["/tmp : overlay<br/>lower = copied snapshot of own files in real /tmp<br/>(real /tmp has locked submounts), upper = runs/id/tmp.up"]
         HIDE["tmpfs over: /run, /var/run, /mnt/wslg, /mnt/wsl, /tmp/.X11-unix,<br/>$XDG_RUNTIME_DIR, Dry Run state dir, ~/.claude"]
-        HOMEX["rest of real $HOME : visible read-only"]
-        SHOME["$HOME=/home/sbx : overlay<br/>lower = template (gitconfig, npmrc minus tokens)"]
-        SEC["~/.ssh ~/.aws ~/.config/gh ~/.netrc ~/.docker ~/.kube ~/.gnupg … :<br/>read-only bind of a host decoy dir (fanotify-watched)"]
+        HOMEX["real $HOME : read-only, $HOME unchanged (toolchains keep working)<br/>writes fail with EROFS → flag ro_write_blocked → H2"]
+        SHOME["existing cache dirs (~/.cache, ~/.npm, …) : overlays<br/>diffs counted, never committed"]
+        SEC["~/.ssh ~/.aws ~/.config/gh ~/.netrc ~/.docker ~/.kube ~/.gnupg … :<br/>read-only bind of a per-run decoy dir with canary tokens<br/>(only for paths that exist)"]
         DEV["/dev : minimal (null, zero, urandom, tty, pts); /proc : new, pid-ns scoped"]
         SC["seccomp: no AF_UNIX sockets, no io_uring, keyctl, bpf, ptrace,<br/>perf, userfaultfd, mount, setns, new userns, TIOCSTI"]
         NET["network: loopback only"]
@@ -260,7 +258,7 @@ that proves it is closed:
 
 | # | Channel to the real system | Mechanism | Canary (must fail inside the shadow) |
 |---|---|---|---|
-| I1 | Filesystem writes | Recursive read-only bind of `/`. Writable only: overlay uppers for the workspace, `/tmp` and scratch `$HOME`, plus tmpfs mounts | write to `/`, real `$HOME`, `/mnt/c`, `/usr/lib/wsl`, and the real `/tmp` path behind the overlay |
+| I1 | Filesystem writes | Recursive read-only bind of `/`. Writable only: overlay uppers for the workspace, `/tmp` and existing home cache dirs, plus tmpfs mounts | write to `/`, real `$HOME`, `/mnt/c`, `/usr/lib/wsl`, and the real `/tmp` path behind the overlay |
 | I2 | Unix-socket services (docker, D-Bus, systemd, snapd, udev, journal, X11/WSLg, ssh-agent, **dryrund itself**) | tmpfs over `/run`, `/var/run`, `$XDG_RUNTIME_DIR`, `/mnt/wslg`, `/tmp/.X11-unix`; **seccomp denies `socket(AF_UNIX)`** (`socketpair` stays allowed) | connect to a canary socket the daemon listens on in the real `/tmp` |
 | I3 | Network | Empty network namespace. Abstract unix sockets are per network namespace, so they are isolated too | TCP to 1.1.1.1:443, a DNS lookup, an abstract-socket connect |
 | I4 | Host processes (signals, ptrace, `/proc`) | PID namespace; new `/proc`; seccomp denies ptrace and `process_vm_writev` | `kill` a canary host process by its PID |
@@ -269,11 +267,11 @@ that proves it is closed:
 | I7 | Kernel-wide state (keyrings, io_uring, bpf, perf, modules, mounts, time) | `cap-drop ALL`, `no_new_privs`, seccomp denylist (Docker default profile plus `io_uring_*`, since io_uring can create sockets without passing the `socket()` filter) | `keyctl`, `io_uring_setup`, `bpf` |
 | I8 | Memory, which could OOM-kill the user's processes | cgroup `MemoryMax` (default 2 GiB), `MemorySwapMax=0`, `oom_score_adj=1000` | allocate past the limit; a canary host process survives |
 | I9 | Process count (fork bomb) | cgroup `TasksMax` (default 512). `RLIMIT_NPROC` alone is shared with the user's real processes, so it is not used alone | fork bomb is contained; host `fork()` still works |
-| I10 | CPU and IO starvation | cgroup `CPUWeight=20`, `IOWeight=20`; wall-clock limit (default 30 s), then SIGKILL of the whole scope | busy loop; host latency probe stays within bounds |
+| I10 | CPU and IO starvation | `nice -n 19` + `ionice -c3`: WSL's user manager delegates only the `memory` and `pids` controllers, not `cpu`/`io` (spike 0); wall-clock limit (default 30 s), then SIGKILL of the whole scope | busy loop; host latency probe stays within bounds |
 | I11 | Disk fill (uppers share the real filesystem) | `RLIMIT_FSIZE` (1 GiB per file); daemon watchdog polls `statvfs` every 50 ms and kills the scope when upper growth exceeds the budget (default 2 GiB) **or** free space would fall below max(5 GiB, 10%); uppers deleted after the decision | `dd` of 3 GiB, killed with the free-space floor intact |
 | I12 | WSL interop (launching Windows `.exe`s) | `/run/WSL` hidden, `WSL_INTEROP` cleared, AF_UNIX denied | run `cmd.exe /c echo` |
 | I13 | Dry Run's own state (tokens, other runs' uppers, journals) | tmpfs over the state dir and `$XDG_RUNTIME_DIR`; state dir mode 0700 | read another run's token |
-| I14 | Secrets leaking into shadow output that the agent sees | Read-only bind of a host decoy dir over secret paths (reads watched by fanotify, see H5); env filtered by a denylist (`*TOKEN*`, `*SECRET*`, `*KEY*`, `AWS_*` …) | `cat ~/.ssh/id_ed25519` returns the decoy |
+| I14 | Secrets leaking into shadow output that the agent sees | Read-only bind of a per-run decoy dir over each secret path **that exists**. Decoy files hold a unique canary token, and any token appearing in stdout/stderr or ChangeSet content (plain, base64 or hex) fires H5. Env filtered by a denylist (`*TOKEN*`, `*SECRET*`, `*KEY*`, `AWS_*` …) | `cat ~/.ssh/id_ed25519` returns the decoy and triggers H5 |
 | I15 | Processes surviving the shadow (daemons, `nohup`, double fork) | PID-namespace init death kills everything; cgroup kill as a backstop | a `setsid nohup sleep` is gone after the run |
 
 **Fail-closed rules**
@@ -384,6 +382,9 @@ already-applied rename finds the target in its final state and skips it.
    `ask` (H9).
 5. The agent cannot commit a run itself. An agent-typed `dryrun apply` is denied, and tokens are
    single-use and bound to a session and run.
+5a. **Dry Run never runs repository-controlled code outside the sandbox.** Its own git queries
+   (`status`, `ls-tree`, `merge-base`), which could trigger `core.fsmonitor` or clean filters from repo
+   config, run inside a read-only bwrap sandbox with no network.
 6. No telemetry. The decision log stays in the local state directory.
 7. The adversarial corpus runs only inside disposable containers (sub-project 2), never on the
    development machine. The core's own tests use harmless targets inside temporary fixture
