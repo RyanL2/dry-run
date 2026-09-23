@@ -73,7 +73,12 @@ class Root:
                     nfd = os.open(comp, _DIR, dir_fd=fd)
                 except OSError as e:
                     if e.errno in (errno.ELOOP, errno.ENOTDIR):
-                        raise ConfinementError(e.errno, f"{rel}: component {comp!r} is not a real directory")
+                        st = os.stat(comp, dir_fd=fd, follow_symlinks=False)
+                        if stat.S_ISLNK(st.st_mode):
+                            raise ConfinementError(e.errno, f"{rel}: component {comp!r} is a symlink")
+                        # A plain non-directory (e.g. a file the ChangeSet replaces with a directory):
+                        # the target simply does not exist yet. Not a confinement problem.
+                        raise NotADirectoryError(errno.ENOTDIR, f"{rel}: component {comp!r} is not a directory")
                     raise
                 os.close(fd)
                 fd = nfd
@@ -85,7 +90,7 @@ class Root:
     def lstat(self, rel: str) -> os.stat_result | None:
         try:
             fd, name = self._parent(rel)
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             return None
         try:
             return os.stat(name, dir_fd=fd, follow_symlinks=False)
@@ -178,7 +183,7 @@ class Root:
     def fsync_parent(self, rel: str) -> None:
         try:
             fd, name = self._parent(rel)
-        except (FileNotFoundError, ConfinementError):
+        except (FileNotFoundError, NotADirectoryError, ConfinementError):
             return
         try:
             os.fsync(fd)

@@ -95,6 +95,20 @@ def test_symlink_swap_between_shadow_and_commit(tmp_path: Path):
     unlock(up / "new" / "deep")
 
 
+def test_file_replaced_by_directory_is_not_a_conflict(tmp_path: Path):
+    ws, up = tmp_path / "ws", tmp_path / "up"
+    ws.mkdir()
+    (ws / "other.txt").write_text("was a file\n")
+    base = fingerprint_tree(ws)
+    (up / "other.txt").mkdir(parents=True)
+    os.setxattr(up / "other.txt", "user.overlay.opaque", b"y")
+    (up / "other.txt" / "x").write_text("in\n")
+    eff = extract("workspace", ws, up, base)
+    cs = ChangeSet(run_id="r1", roots={"workspace": str(ws)}, base_digest="x", ops=eff.ops, refused=eff.refused)
+    apply_changeset(cs, journal_path=tmp_path / "j.json")
+    assert (ws / "other.txt" / "x").read_text() == "in\n"
+
+
 def test_refused_changeset_is_not_applied(tmp_path: Path):
     ws, up, cs = build(tmp_path)
     cs.refused.append({"path": "h", "reason": "hardlink_in_shadow"})
