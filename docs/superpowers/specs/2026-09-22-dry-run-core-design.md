@@ -4,7 +4,7 @@
 - **Status:** design approved in conversation section by section; this written spec is awaiting review.
 - **Architecture & diagrams:** [docs/ARCHITECTURE.md](../../ARCHITECTURE.md)
 - **Harm policy:** [docs/harm-policy.md](../../harm-policy.md)
-- **Research & backlog:** [docs/research-notes.md](../../research-notes.md)
+- **Research facts:** [docs/research-notes.md](../../research-notes.md) · **Research loop:** [research/program.md](../../../research/program.md), [cards](../../../research/cards/)
 - **Source brief:** `dry-run-brief.md` (kept outside the repo). Where this spec and the brief differ,
   this spec wins; the differences are listed in §10.
 
@@ -41,7 +41,8 @@ Build a local gate for Claude Code's Bash tool. Before a command runs for real, 
 
 - the benchmark and its data generator — sub-project 2
 - model training and calibration — sub-project 3
-- network-read tier, shadow cache, divergence audit — v1.1 backlog B1–B3
+- network-read tier, shadow cache, divergence audit — roadmap R1–R3 (ARCHITECTURE §13)
+- the automated research loop (monitor, frozen evaluator, promotion gate) — start of sub-project 2 (ARCHITECTURE §12). Sub-project 1 uses cards and a ledger by hand for its sandbox-performance experiments (C-0001–C-0003)
 - macOS and Windows-native support
 - gVisor backend
 
@@ -88,7 +89,7 @@ The shadow must not affect the real system. Treat every shadowed command as host
 | ID | Requirement | How it is measured |
 |---|---|---|
 | N1 | Added latency on the non-shadow paths: p50 < 300 ms, p95 < 500 ms, **hook process included** | `bench/latency.py` over 200 read-only and 50 non-shadowable commands |
-| N2 | Shadow overhead: report the p50 ratio of shadow-path latency to native runtime over the realistic command set. Target ≤ 1.5×; the result is reported whatever it is (the worst case measured so far is 1.65×) | `bench/overhead.py` |
+| N2 | Shadow overhead: report the p50 ratio of shadow-path latency to native runtime over the realistic command set. Target ≤ 1.5×; the result is reported whatever it is (the worst case measured so far is 1.65×). Diagnosis follows cards C-0001–C-0003 | `bench/overhead.py` |
 | N3 | Fidelity: for every scenario, the tree after shadow+commit equals the tree after a real run in content, type, mode, symlink target and (for commit mode) mtime. **0 mismatches** | `tests/fidelity/` |
 | N4 | Fail to ask: 100% of the injected faults (daemon killed, hung, garbage reply, socket missing, exception in the hook) produce `ask` | `tests/hook/test_fail_closed.py` |
 | N5 | Python ≥ 3.10; the hook uses the stdlib only; runtime dependencies are `tree-sitter` + `tree-sitter-bash`, `pyyaml`, `jsonschema` (tests only), `pytest`/`hypothesis` (dev) | `pyproject.toml` |
@@ -203,7 +204,7 @@ pending_ttl_min: 15
 |---|---|---|
 | `tests/unit/` | triage tables: every GuardFall class A–E and every #85274 pattern **must not** reach `read_only`; effects conversion on real overlay fixtures (whiteout forms, opaque dirs, no-op copy-ups, symlinks); each rule with a positive and a negative EffectRecord fixture; schema validation | all pass |
 | `tests/hook/` | fault injection for fail-to-ask; protocol round-trips; `updatedInput` shape | N4 = 100% |
-| `tests/fidelity/` | every pitfall in research notes §4 and ARCHITECTURE §7, plus hypothesis-generated random sequences of filesystem ops. Each runs for real on copy A and shadow+commit on copy B, then the trees are compared. Also: conflict detection (a target edited between shadow and commit), a crash mid-commit followed by recovery | N3 = 0 mismatches; conflicts always exit 4 with nothing written |
+| `tests/fidelity/` | every pitfall in research notes §3 and ARCHITECTURE §7, plus hypothesis-generated random sequences of filesystem ops. Each runs for real on copy A and shadow+commit on copy B, then the trees are compared. Also: conflict detection (a target edited between shadow and commit), a crash mid-commit followed by recovery | N3 = 0 mismatches; conflicts always exit 4 with nothing written |
 | `tests/isolation/` | canaries I1–I15 + S2 static check + S4 symlink-swap attack on commit | all blocked |
 | `bench/` | latency (N1), overhead (N2) | N1 met; N2 reported |
 | `tests/e2e/` (manual/opt-in) | headless `claude -p` in a throwaway repo: an allowed edit commits; `bash cleanup.sh` deleting `src/` triggers `ask`; daemon stopped → `ask` | documented run |
@@ -247,7 +248,7 @@ Any "no" goes back to the design, and this spec is amended before implementation
 | Risk | Handling |
 |---|---|
 | bwrap overlay flags behave differently than documented on WSL | Spike 0; fallback is a small launcher using `unshare` + `mount`, 7 ms measured (approach B) |
-| Overlay overhead above 1.5× on real sessions | Report it; B3 cache; narrow shadowing (brief §10 stop condition) |
-| Many benign commands hit H7 (network) and so `ask + rerun` | Count them in the decision log; this is the motivation for B1, the network-read tier |
+| Overlay overhead above 1.5× on real sessions | Cards C-0001–C-0003 find what drives it; R3 cache; narrow shadowing (brief §10 stop condition) |
+| Many benign commands hit H7 (network) and so `ask + rerun` | Count them in the decision log; over 2% triggers roadmap R1, the network-read tier |
 | Hook latency dominated by Python startup | Measure first. If the p50 of N1 is at risk, rewrite only `dryrun-hook` as a static binary; the contracts don't change |
-| Kernel escape from user namespaces | Residual. Seccomp denylist; B6 gVisor backend; README says so |
+| Kernel escape from user namespaces | Residual. Seccomp denylist; R6 gVisor backend; README says so |

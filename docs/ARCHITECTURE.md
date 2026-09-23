@@ -3,7 +3,8 @@
 > Decide from **observed effects** before an agent's command touches real files.
 > Status: design approved 2026-09-22; sub-project 1 (core) is the first implementation target.
 > Companion documents: [design spec](superpowers/specs/2026-09-22-dry-run-core-design.md) ·
-> [harm policy](harm-policy.md) · [research notes & improvement backlog](research-notes.md).
+> [harm policy](harm-policy.md) · [research notes (facts)](research-notes.md) ·
+> [research program](../research/program.md) · [experiment cards](../research/cards/).
 
 ---
 
@@ -61,12 +62,19 @@ flowchart TB
         DS --> BL[baselines: regex, CARE, frontier judge, AgentDoG, Qwen3Guard]
     end
     subgraph SP3["Sub-project 3 — Judge model"]
-        SFT[cost-weighted SFT] --> CAL["temperature scaling +<br/>Learn-then-Test thresholds"]
-        CAL --> GG[optional Dr.GRPO / Balance-GRPO]
+        SFT["SFT + tuned threshold<br/>(reference arm)"] --> WCE["cost-weighted CE<br/>(only if it beats SFT)"]
+        WCE --> GG["Dr.GRPO<br/>(only if it beats WCE)"]
+        SFT --> CAL["temperature scaling +<br/>Learn-then-Test thresholds"]
+    end
+    subgraph SPR["Research loop — built at start of SP2 (§12)"]
+        MON[monitor.py] --> AG[research agent, on events]
+        AG --> CARDS[cards + method memory]
+        CARDS --> MON
     end
     EF -. "dryrun.effect/1 schema" .-> HAR
     SB -. "same runner, inside disposable containers" .-> HAR
-    DS --> SFT
+    DS -- "frozen evaluator + splits" --> MON
+    MON -- "runs experiments" --> SFT
     CAL -. "EffectJudge interface" .-> RJ
     DM -. "local decision log, no telemetry" .-> CAL
 ```
@@ -291,12 +299,13 @@ that proves it is closed:
 
 **Residual risk, stated honestly.** Kernel vulnerabilities in user namespaces or overlayfs could still
 let a hostile command escape. The seccomp denylist shrinks that attack surface but cannot remove it. An
-optional gVisor (`runsc`) backend for extra hardening is on the backlog (research notes §4).
+optional gVisor (`runsc`) backend for extra hardening is roadmap item R6 (§13).
 
 Measured on the dev box (WSL2 6.18, ext4): overlay mount and startup ≈ 7 ms; a worst-case write-heavy
 workload runs at ≈ 1.65× native; the strace filter adds ≈ 3%; walking an upper dir with 22k entries takes
 16 ms; fingerprinting 20k files takes 55 ms. The 1.65× worst case exceeds the brief's 1.5× target. See
-[research notes §4](research-notes.md) for mitigations and for how the overhead will be reported.
+[research notes §3](research-notes.md) for the measurements. What drives the overhead is tested by cards
+C-0001–C-0003, and the result is reported whatever it is.
 
 **Upper dir → ChangeSet rules** (unprivileged overlay: `userxattr`, `redirect_dir=nofollow`,
 `metacopy=off`, no `index`):
@@ -392,5 +401,89 @@ already-applied rename finds the target in its final state and skips it.
 - Overlay semantics that cannot be committed faithfully (hard links, directory renames under EXDEV,
   special files) resolve to `ask + rerun`.
 - In `rerun` mode the real run can differ from the shadow. A post-run divergence audit is planned for
-  v1.1 ([research notes §3](research-notes.md)).
+  v1.1 (roadmap R2, §13).
 - Defense in depth, not a guarantee. Keep backups and use OS sandboxing.
+
+---
+
+## 12. Research loop (built at the start of sub-project 2)
+
+This section covers how Dry Run finds out which methods work. It borrows from karpathy/autoresearch:
+a frozen evaluator, one editable surface per track, a fixed budget per run, a single metric, keep or
+discard through git, and a simplicity criterion. It adds four things autoresearch lacks:
+**method-level memory with abandonment**, **event-driven wake-ups** so monitoring is separate from
+reasoning, **literature search only on demand**, and **a promotion gate** that validates before it
+promotes. The rules are in [`research/program.md`](../research/program.md). The experiments are
+six-line cards in [`research/cards/`](../research/cards/).
+
+```mermaid
+flowchart LR
+    H([human]) -- edits --> PG["research/program.md<br/>objective, metric, surfaces, budgets"]
+    subgraph MON["monitor.py: a script, no LLM"]
+        Q[card queue] --> RUN["run on exp branch<br/>fixed budget"]
+        RUN --> HC["health: NaN, OOM, timeout,<br/>evaluator hash check"]
+        HC --> MET[metrics + CIs, ledger append]
+        MET --> EV{event?}
+    end
+    EV -- "no: routine" --> Q
+    EV -- "finished, failed, milestone,<br/>plateau, novelty" --> AG["research agent<br/>payload = metrics, deltas, ≤10 clips"]
+    AG -- "new or closed cards,<br/>verdict line" --> Q
+    AG -- "question raised" --> LS["focused search<br/>≤3 papers, 5-field extraction"]
+    LS --> AG
+    MET --> RES["results.md + method table<br/>auto-generated"]
+    FZ[("research/frozen<br/>evaluator + split manifests")] -. read-only .-> RUN
+```
+
+### 12.1 Method lifecycle: stop tuning a dead idea
+
+```mermaid
+stateDiagram-v2
+    [*] --> Proposed: card written (registry checked first)
+    Proposed --> Active: queued by the agent
+    Active --> Active: variant run, counts against the method budget
+    Active --> Candidate: beats incumbent on dev-iterate beyond noise
+    Candidate --> Promoted: passes gate (3 seeds, dev-gen, guardrails, ablation)
+    Candidate --> Active: fails gate, reason logged
+    Active --> Abandoned: Disproof observed, OR budget spent, OR 3 variants in a row within noise
+    Abandoned --> Proposed: only if its revive-only-if condition is met
+    Promoted --> [*]
+```
+
+### 12.2 Evaluation splits: development vs final test
+
+```mermaid
+flowchart LR
+    GEN[benchmark generator] --> DI["dev-iterate<br/>unlimited reads<br/>calibration fold + evaluation fold"]
+    GEN --> DG["dev-gen<br/>held-out generators and obfuscation families<br/>read only by the promotion gate<br/>counts as development data"]
+    GEN --> FT["final-test<br/>read ONCE, analysis plan committed first<br/>every read logged"]
+    FT -. "if ever consumed" .-> NEW["regenerate from new seeds and families<br/>never reuse"]
+```
+
+### 12.3 Decisions that follow from this
+
+- **Judge objective ladder:** plain SFT + tuned threshold → cost-weighted CE → GRPO. With calibrated
+  probabilities, the asymmetric cost of a miss is already handled at decision time by the threshold.
+  So a higher rung must improve **ranking** (pAUC over benign-ask ∈ [0, 5%]) beyond noise, at each
+  arm's own tuned threshold, to earn its place. Cost is measured, not assumed.
+- **What counts as a card:** hypotheses about mechanisms (C-0001 onwards). Engineering features with a
+  trigger metric belong in the roadmap (§13) and don't need cards.
+- **Sub-project 1 uses the loop by hand:** cards plus a ledger for the sandbox-performance track
+  (C-0001–C-0003). The monitor, the frozen evaluator and the automatic promotion gate are built at the
+  start of sub-project 2, because they need the benchmark.
+- **Dogfooding:** a Dry Run H9-style rule protects `research/frozen/**` from the agent that runs the
+  experiments.
+
+## 13. Roadmap (engineering features, each with a trigger)
+
+| ID | Feature | Trigger metric (from the decision log or benchmark) | Target |
+|---|---|---|---|
+| R1 | Network-read tier: proxy that allows only registries and git hosts, plus cache pre-warming | H7 `ask + rerun` > 2% of shadowed commands in real sessions | v1.1 |
+| R2 | Divergence audit for `rerun` mode: re-run in a fresh overlay and compare | `rerun` > 5% of decisions | v1.1 |
+| R3 | Content-addressed shadow cache (argv, cwd, env, workspace fingerprint) | C-0003 shows fixed costs dominate, or repeat rate > 20% | v1.1 |
+| R4 | Session-level effect accumulation for the judge | split-attack misses on the MT-AgentRisk-style benchmark class | SP3 |
+| R5 | Taint from untrusted input (CaMeL/FIDES-style) | prompt-injection items in the benchmark missed | v2 |
+| R6 | gVisor `runsc` backend for high-risk commands | an isolation canary fails on any supported kernel, or on user demand | v2 |
+| R7 | Effect summary into auto mode through PostToolUse `classifierContext` | cheap; after v1 is stable | v1.1 |
+| R8 | macOS port (APFS `clonefile` + `sandbox-exec`) | demand | v2 |
+| R9 | Early Intervention Rate metric in the benchmark | SP2 spec | SP2 |
+| R10 | Cost-aware shadowing (skip the shadow when the predicted cost is high and the risk is low) | real-session overhead > 1.5× after R3 | v2 |

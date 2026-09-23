@@ -13,7 +13,8 @@ command.
 - [Architecture (with diagrams)](docs/ARCHITECTURE.md)
 - [Sub-project 1 design spec](docs/superpowers/specs/2026-09-22-dry-run-core-design.md)
 - [Harm policy](docs/harm-policy.md)
-- [Research notes and improvement backlog](docs/research-notes.md)
+- [Research notes (facts)](docs/research-notes.md)
+- [Research program](research/program.md) and [experiment cards](research/cards/)
 
 ## Limits: please read
 
