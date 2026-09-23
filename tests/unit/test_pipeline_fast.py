@@ -12,6 +12,10 @@ def pipe(tmp_path: Path, gate_ok=True) -> Pipeline:
                     home=tmp_path / "home")
 
 
+def dryrun(tmp_path: Path) -> str:
+    return str(tmp_path / "home" / ".local" / "bin" / "dryrun")  # the executable the hook issues
+
+
 def req(cmd: str, cwd: Path) -> dict:
     return {"op": "pretool", "session_id": "s", "cwd": str(cwd), "command": cmd, "description": "",
             "transcript_path": "", "env": {}, "deadline_ms": 5000}
@@ -32,7 +36,8 @@ def test_agent_typed_apply_denied_but_valid_token_allowed(tmp_path: Path):
     assert p.handle_pretool(req("dryrun apply 68d2f1a3-0badc0de --token x", tmp_path)).decision == "deny"
     run = p.store.new_run()
     token = p.store.authorize(run, session_id="s", decision="allow")
-    d = p.handle_pretool(req(f"dryrun apply {run.run_id} --token {token}", tmp_path))
+    assert p.handle_pretool(req(f"dryrun apply {run.run_id} --token {token}", tmp_path)).decision == "deny"
+    d = p.handle_pretool(req(f"{dryrun(tmp_path)} apply {run.run_id} --token {token}", tmp_path))
     assert d.decision == "allow"
 
 
@@ -46,3 +51,18 @@ def test_decisions_are_logged(tmp_path: Path):
     p = pipe(tmp_path)
     p.handle_pretool(req("ls", tmp_path))
     assert '"decision": "allow"' in p.store.log_path.read_text()
+
+
+def test_apply_token_must_be_authorized_whole_command_and_same_session(tmp_path: Path):
+    p = pipe(tmp_path)
+    pending = p.store.new_run()
+    tok = p.store.authorize(pending, session_id="s", decision="ask")      # user may have declined
+    exe = dryrun(tmp_path)
+    assert p.handle_pretool(req(f"{exe} apply {pending.run_id} --token {tok}", tmp_path)).decision == "deny"
+    ok = p.store.new_run()
+    tok2 = p.store.authorize(ok, session_id="s", decision="allow")
+    compound = f"{exe} apply {ok.run_id} --token {tok2}; rm -rf ~"
+    assert p.handle_pretool(req(compound, tmp_path)).decision == "deny"
+    other = dict(req(f"{exe} apply {ok.run_id} --token {tok2}", tmp_path), session_id="other-session")
+    assert p.handle_pretool(other).decision == "deny"
+    assert p.handle_pretool(req(f"{exe} apply {ok.run_id} --token {tok2}", tmp_path)).decision == "allow"

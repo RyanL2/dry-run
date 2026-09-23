@@ -140,3 +140,45 @@ def test_skip_ignores_subtree(tmp_path: Path):
     (upper / "mnt" / "ws" / "f").write_text("f")
     eff = extract("tmp", lower, upper, fingerprint_tree(lower), skip=frozenset({"mnt/ws"}))
     assert {o.target for o in eff.ops} == {"mnt"}
+
+
+def test_directories_without_search_or_read_permission_are_still_extracted(tmp_path: Path):
+    lower, upper = setup(tmp_path)
+    (upper / "d").mkdir()
+    (upper / "d" / "c").write_text("a")
+    os.chmod(upper / "d", 0o600)                                     # mkdir d; echo a > d/c; chmod 600 d
+    (upper / "w").mkdir()
+    (upper / "w" / "c").write_text("b")
+    os.chmod(upper / "w", 0o300)                                     # not listable
+    eff = extract("workspace", lower, upper, fingerprint_tree(lower))
+    ops = {(o.op, o.target): o for o in eff.ops}
+    assert ops[("mkdir", "d")].mode == 0o600 and ("rename_in", "d/c") in ops
+    assert ops[("mkdir", "w")].mode == 0o300 and ("rename_in", "w/c") in ops
+
+
+def test_effects_inside_a_directory_we_cannot_write_are_refused(tmp_path: Path):
+    lower, upper = setup(tmp_path)
+    (lower / "RO").mkdir()
+    (lower / "RO" / "old").write_text("o")
+    base = fingerprint_tree(lower)
+    os.chmod(lower / "RO", 0o555)
+    (upper / "RO").mkdir()
+    (upper / "RO" / "new").write_text("n")                           # chmod u+w RO; echo n > RO/new; chmod u-w RO
+    os.chmod(upper / "RO", 0o555)
+    try:
+        eff = extract("workspace", lower, upper, base)
+    finally:
+        os.chmod(lower / "RO", 0o755)
+    assert {"path": "RO/new", "reason": "read_only_parent"} in eff.refused
+
+
+def test_a_changed_workspace_root_mode_is_refused_not_ignored(tmp_path: Path):
+    lower, upper = setup(tmp_path)
+    (upper / "n.txt").write_text("n")
+    base = fingerprint_tree(lower)
+    os.chmod(upper, 0o600)                                           # chmod 600 .
+    try:
+        eff = extract("workspace", lower, upper, base)
+    finally:
+        os.chmod(upper, 0o755)
+    assert any(r["path"] == "." and r["reason"] == "workspace_root_mode" for r in eff.refused)

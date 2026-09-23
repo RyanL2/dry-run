@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import threading
 import time
 import traceback
@@ -78,7 +79,10 @@ class Pipeline:
         return decision
 
     # --- internals -------------------------------------------------------------------------------
-    def _token_valid(self, run_id: str, token: str) -> bool:
+    def _token_valid(self, run_id: str, token: str, session_id: str) -> bool:
+        """Only an `allow` result of this same session. A `pending` token belongs to an ask the user may
+        have declined; Claude Code does not re-run hooks on updatedInput (spike 0), so the legitimate
+        approved-ask path never reaches this check."""
         try:
             run = self.store.run(run_id)
         except TokenError:
@@ -86,14 +90,16 @@ class Pipeline:
         meta = self.store.load_meta(run)
         want = str(meta.get("token_sha256", ""))
         got = hashlib.sha256(token.encode()).hexdigest()
-        return meta.get("status") in ("authorized", "pending") and hmac.compare_digest(want, got)
+        return (meta.get("status") == "authorized" and meta.get("session_id") == session_id
+                and hmac.compare_digest(want, got))
 
     def _workspace_problem(self, ws_root: Path) -> str | None:
         if not ws_root.is_dir():
             return f"working directory {ws_root} does not exist"
-        if ws_root in (Path("/"), self.home) or ws_root == Path.home():
+        broad = {Path("/"), Path(os.path.realpath(self.home)), Path(os.path.realpath(Path.home()))}
+        if ws_root in broad:
             return f"workspace {ws_root} is too broad (home or /); open a project directory"
-        state = self.store.root
+        state = Path(os.path.realpath(self.store.root))
         for a, b in ((state, ws_root), (ws_root, state)):
             try:
                 a.relative_to(b)
@@ -108,13 +114,15 @@ class Pipeline:
     def _decide(self, req: dict, cancel: threading.Event | None, timings: dict) -> tuple[Decision, dict | None]:
         session_id = str(req.get("session_id", ""))
         command = str(req.get("command", ""))
-        cwd = Path(str(req.get("cwd") or "/"))
+        # Resolve symlinks first: every workspace check and the bwrap spec must see the real path.
+        cwd = Path(os.path.realpath(str(req.get("cwd") or "/")))
         ws_root = gitstate.find_workspace_root(cwd)
+        env = {str(k): str(v) for k, v in dict(req.get("env") or {}).items()}
         t = time.monotonic()
-        tri = classify(command, ws_root, self.cfg.policy, home=self.home)
+        tri = classify(command, ws_root, self.cfg.policy, home=self.home, env=env)
         timings["triage"] = int((time.monotonic() - t) * 1000)
         if tri.cls == "apply":
-            if tri.apply_args and self._token_valid(*tri.apply_args):
+            if tri.apply_args and self._token_valid(*tri.apply_args, session_id):
                 return Decision("allow", "passthrough", "commit of a reviewed Dry Run result"), None
             return decide("apply"), None
         if tri.cls != "shadow":

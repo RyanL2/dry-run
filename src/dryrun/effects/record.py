@@ -65,7 +65,10 @@ def git_effects(ws_root: Path, run: RunPaths, ws_entries: list[FsEntry]) -> dict
     before = read_refs(git_dir)
     up_git = run.ws_up / ".git"
     after = read_refs(git_dir, up_git if up_git.is_dir() else None)
-    objects = up_git / "objects" if (up_git / "objects").is_dir() else None
+    # Shadow-controlled: never hand a symlinked .git or objects dir (e.g. -> /) to the git sandbox as a bind.
+    shadow_objects = up_git / "objects"
+    real = not up_git.is_symlink() and not shadow_objects.is_symlink() and shadow_objects.is_dir()
+    objects = shadow_objects if real else None
     changes: list[RefChange] = []
     checks = 0
     for ref in sorted(set(before) | set(after)):

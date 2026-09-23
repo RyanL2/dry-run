@@ -88,3 +88,21 @@ def test_git_effects_classifies_internals_and_refs(tmp_path: Path):
     assert g["objects_deleted"] == 1
     assert g["internals_touched"] == [".git/modules/x"]
     assert [(r.ref, r.change) for r in g["refs_changed"]] == [("refs/heads/topic", "created")]
+
+
+def test_git_effects_never_hands_a_symlinked_shadow_objects_dir_to_git(tmp_path: Path, monkeypatch):
+    import dryrun.effects.record as record
+    ws = tmp_path / "ws"
+    (ws / ".git" / "refs" / "heads").mkdir(parents=True)
+    (ws / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (ws / ".git" / "refs" / "heads" / "main").write_text("a" * 40 + "\n")
+    run = RunPaths(tmp_path / "run")
+    run.create()
+    (run.ws_up / ".git" / "refs" / "heads").mkdir(parents=True)
+    (run.ws_up / ".git" / "refs" / "heads" / "main").write_text("b" * 40 + "\n")
+    (tmp_path / "host").mkdir()
+    (run.ws_up / ".git" / "objects").symlink_to(tmp_path / "host")              # ln -s / .git/objects
+    seen = []
+    monkeypatch.setattr(record, "is_ancestor", lambda ws_root, old, new, extra: seen.append(extra) or None)
+    record.git_effects(ws, run, [FsEntry(op="modify", path=".git/refs/heads/main", kind="file", preexisting=True)])
+    assert seen and all(extra is None for extra in seen)          # main and HEAD both moved

@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from dryrun.config import ShadowConfig
+from dryrun.config import Policy, ShadowConfig
 from dryrun.paths import bwrap_path, ensure_private_dir, state_dir
 from dryrun.sandbox.layout import SandboxSpec, bwrap_argv, existing
 from dryrun.sandbox.seccomp import build_filter
@@ -197,19 +197,42 @@ def run_shadow(spec: SandboxSpec, *, run_id: str, out_dir: Path, cfg: ShadowConf
                        killed_reason=killed, stdout_path=stdout_p, stderr_path=stderr_p, trace_path=trace_p)
 
 
-def run_readonly(argv: list[str], *, cwd: Path, env: dict[str, str] | None = None,
-                 timeout: float = 20.0) -> subprocess.CompletedProcess:
+READONLY_MEMORY_MAX = 1024**3
+READONLY_TASKS_MAX = 128
+
+
+def _secret_hides(home: Path) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """tmpfs over secret directories, /dev/null over secret files. Symlinked secrets (~/.ssh -> /mnt/c/...,
+    dotfile managers) are hidden at their resolved target, since bwrap cannot mount over a symlink."""
+    dirs, files = [], []
+    for rel in Policy().secret_paths:
+        real = Path(os.path.realpath(home / rel))
+        if real.is_dir():
+            dirs.append(str(real))
+        elif real.exists():
+            files.append(("/dev/null", str(real)))
+    return tuple(dirs), tuple(files)
+
+
+def run_readonly(argv: list[str], *, cwd: Path, env: dict[str, str] | None = None, timeout: float = 20.0,
+                 extra_ro_binds: tuple[tuple[str, str], ...] = ()) -> subprocess.CompletedProcess:
     """Run a trusted argv (Dry Run's own git queries) in a read-only, network-less sandbox so that
-    repository-controlled programs (core.fsmonitor, clean filters) can never touch the real system."""
+    repository-controlled programs (core.fsmonitor, clean filters) can never touch the real system:
+    same seccomp filter, Dry Run's state and the user's secrets hidden, and (when available) the same
+    kind of cgroup scope as shadow runs so they cannot exhaust host memory or PIDs."""
     base = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(Path.home()), "LANG": "C.UTF-8",
             "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0"}
     base.update(env or {})
-    fd = os.open(_filter_file(), os.O_RDONLY)
-    try:
-        spec = SandboxSpec(bwrap=str(bwrap_path()), overlays=(),
-                           hide_early=existing(["/run", "/mnt/wsl", "/mnt/wslg"]), hide_late=(), ro_binds=(),
-                           env=base, cwd=str(cwd), argv=tuple(argv), seccomp_fd=fd)
-        return subprocess.run(bwrap_argv(spec), capture_output=True, timeout=timeout, pass_fds=(fd,),
-                              env=launcher_env(), stdin=subprocess.DEVNULL)
-    finally:
-        os.close(fd)
+    secret_dirs, secret_files = _secret_hides(Path.home())
+    spec = SandboxSpec(bwrap=str(bwrap_path()), overlays=(),
+                       hide_early=existing(["/run", "/mnt/wsl", "/mnt/wslg"]),
+                       hide_late=existing([str(state_dir()), *secret_dirs]),
+                       ro_binds=secret_files + tuple(extra_ro_binds),
+                       env=base, cwd=str(cwd), argv=tuple(argv), seccomp_fd=SECCOMP_FD)
+    inner = ["prlimit", "--core=0", "--", "sh", "-c", 'exec 9<"$0" && exec "$@"', str(_filter_file()),
+             *bwrap_argv(spec)]
+    if _cgroup_scope_works():
+        inner = ["systemd-run", "--user", "--scope", "-q", "-p", f"MemoryMax={READONLY_MEMORY_MAX}",
+                 "-p", "MemorySwapMax=0", "-p", f"TasksMax={READONLY_TASKS_MAX}", "--", *inner]
+    return subprocess.run(inner, capture_output=True, timeout=timeout, env=launcher_env(),
+                          stdin=subprocess.DEVNULL, start_new_session=True)

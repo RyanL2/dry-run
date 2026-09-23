@@ -94,6 +94,13 @@ class _Extractor:
 
     # --- helpers -------------------------------------------------------------------------------
     def _op(self, op: str, rel: str, **kw) -> ChangeOp:
+        # Adding or removing an entry needs a writable parent; the commit never loosens a real directory's
+        # mode to get one, so such an effect cannot be committed faithfully.
+        refusal = {"path": rel, "reason": "read_only_parent"}
+        if op != "chmod" and not self._parent_fresh(rel) and refusal not in self.eff.refused:
+            parent = os.path.join(self.lower, rel.rpartition("/")[0])
+            if os.path.isdir(parent) and not os.access(parent, os.W_OK | os.X_OK):
+                self.eff.refused.append(refusal)
         return ChangeOp(seq=-1, op=op, area=self.area, target=rel, base_fp=self._base(rel), **kw)
 
     def _base(self, rel: str) -> list[int] | None:
@@ -197,6 +204,9 @@ class _Extractor:
                 self.fresh.add(rel)
             elif stat.S_IMODE(st.st_mode) != stat.S_IMODE(lst.st_mode):
                 self._chmod(rel, st, lst)
+            # The mode is recorded above; the upper copy needs u+rwx so its children can be listed and moved.
+            if stat.S_IMODE(st.st_mode) & 0o700 != 0o700:
+                os.chmod(up, stat.S_IMODE(st.st_mode) | 0o700)
             stack.append(rel)
             return
         if stat.S_ISREG(st.st_mode):
@@ -227,12 +237,20 @@ class _Extractor:
         self._refuse(rel, "special_file")
 
     def run(self, seq_start: int) -> AreaEffect:
+        # The upper root is never visited, so a `chmod .` shows up only as its mode: Dry Run creates it 0700,
+        # and it may equal the real root's mode; anything else is a root mode change we cannot commit.
+        root_mode = stat.S_IMODE(os.lstat(self.upper).st_mode)
+        low = _lstat(self.lower)
+        if root_mode not in (0o700, stat.S_IMODE(low.st_mode) if low is not None else 0o700):
+            self._refuse(".", "workspace_root_mode")
+            os.chmod(self.upper, root_mode | 0o700)
         stack = [""]
         while stack:
             rel_dir = stack.pop()
             try:
                 names = sorted(os.listdir(os.path.join(self.upper, rel_dir) if rel_dir else self.upper))
             except OSError:
+                self._refuse(rel_dir or ".", "unreadable_dir")  # never silently hide a directory's effects
                 continue
             for name in names:
                 rel = f"{rel_dir}/{name}" if rel_dir else name

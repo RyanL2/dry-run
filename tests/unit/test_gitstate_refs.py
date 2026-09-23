@@ -44,3 +44,39 @@ def test_find_workspace_root(tmp_path: Path):
     assert find_workspace_root(tmp_path / "repo" / "a" / "b") == tmp_path / "repo"
     (tmp_path / "plain").mkdir()
     assert find_workspace_root(tmp_path / "plain") == tmp_path / "plain"
+
+
+def test_read_refs_ignores_fifos_symlinks_and_huge_files_from_the_shadow(tmp_path: Path):
+    import threading
+    g = make_git(tmp_path / "lower")
+    up = tmp_path / "upper" / ".git"
+    (up / "refs" / "heads").mkdir(parents=True)
+    os.mkfifo(up / "refs" / "heads" / "fifo")                         # would block a naive read forever
+    (up / "refs" / "heads" / "zero").symlink_to("/dev/zero")          # would read forever
+    (up / "packed-refs").symlink_to("/dev/zero")
+    out = {}
+    t = threading.Thread(target=lambda: out.setdefault("refs", read_refs(g, up)), daemon=True)
+    t.start()
+    t.join(10)
+    assert not t.is_alive(), "read_refs blocked on shadow-controlled content"
+    assert "refs/heads/fifo" not in out["refs"] and "refs/heads/zero" not in out["refs"]
+
+
+def test_read_refs_never_follows_symlinked_directories_from_the_shadow(tmp_path: Path):
+    g = make_git(tmp_path / "lower")
+    host = tmp_path / "host"                                           # stands in for / or /usr
+    (host / "heads").mkdir(parents=True)
+    (host / "heads" / "planted").write_text(C + "\n")
+    up = tmp_path / "upper" / ".git"
+    up.mkdir(parents=True)
+    (up / "refs").symlink_to(host)                                    # rm -rf .git/refs; ln -s / .git/refs
+    assert "refs/heads/planted" not in read_refs(g, up)
+    up2 = tmp_path / "upper2"
+    up2.mkdir()
+    (up2 / ".git").symlink_to(host.parent)
+    assert "refs/heads/planted" not in read_refs(g, up2 / ".git")
+    up3 = tmp_path / "upper3" / ".git"
+    (up3 / "refs" / "heads").mkdir(parents=True)
+    with open(up3 / "refs" / "heads" / "huge", "wb") as f:
+        f.truncate(1024**3)                                           # sparse 1 GiB regular file
+    assert "refs/heads/huge" not in read_refs(g, up3)

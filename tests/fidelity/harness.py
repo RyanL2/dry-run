@@ -69,8 +69,8 @@ def shadow_commit(ws: Path, cmd: str, state: Path) -> tuple[ChangeSet, dict[str,
 
 
 def tree(root: Path) -> dict:
-    out = {}
-    for dirpath, dirnames, filenames in os.walk(root):
+    out, opened = {}, []
+    for dirpath, dirnames, filenames in os.walk(root):  # top-down: a dir is opened before os.walk enters it
         for name in dirnames + filenames:
             p = os.path.join(dirpath, name)
             rel = os.path.relpath(p, root)
@@ -78,10 +78,16 @@ def tree(root: Path) -> dict:
             if stat.S_ISLNK(st.st_mode):
                 out[rel] = ("link", os.readlink(p), None)
             elif stat.S_ISDIR(st.st_mode):
-                out[rel] = ("dir", stat.S_IMODE(st.st_mode), None)
+                mode = stat.S_IMODE(st.st_mode)
+                out[rel] = ("dir", mode, None)
+                if mode & 0o700 != 0o700:  # e.g. chmod 600 d: temporarily searchable, restored below
+                    os.chmod(p, mode | 0o700)
+                    opened.append((p, mode))
             else:
                 with open(p, "rb") as f:
                     out[rel] = ("file", stat.S_IMODE(st.st_mode), f.read(), st.st_mtime_ns)
+    for p, mode in reversed(opened):
+        os.chmod(p, mode)
     return out
 
 

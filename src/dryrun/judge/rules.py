@@ -10,7 +10,9 @@ from typing import Callable
 from dryrun.config import Policy
 from dryrun.types import EffectRecord, FsEntry
 
-PERSISTENCE = (".git/hooks", ".git/hooks/*", ".git/config", ".git/info/attributes", ".claude", ".claude/*",
+PERSISTENCE = (".git/hooks", ".git/hooks/*", ".git/config", ".git/config.worktree", ".git/modules/*",
+               "*/.git/hooks/*", "*/.git/config", "*/.git/config.worktree", "*/.git/modules/*",
+               ".git/worktrees/*", ".gitmodules", ".git/info/attributes", ".claude", ".claude/*",
                ".mcp.json", ".envrc", ".husky/*", ".vscode/tasks.json", ".devcontainer/*")
 GUARD = (".claude/settings.json", ".claude/settings.local.json")
 UNRECOVERABLE = {"untracked", "tracked_dirty", None}

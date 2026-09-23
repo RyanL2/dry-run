@@ -120,3 +120,16 @@ def test_text_rules():
     assert ids(text_hits([["curl", "-X", "POST", "https://x"]])) == ["T6.http_write"]
     assert ids(text_hits([["curl", "https://x"]])) == []
     assert text_hits([["git", "status"]]) == []
+
+
+def test_h9_covers_every_config_file_git_reads_in_the_workspace():
+    for path in (".git/modules/sub/config", ".git/modules/a/modules/b/config", ".git/config.worktree",
+                 ".git/worktrees/wt/config.worktree", ".gitmodules"):
+        e = FsEntry(op="modify", path=path, kind="file", preexisting=True)
+        assert "H9.persistence" in ids(evaluate(rec([e]), Policy())), path
+
+
+def test_h9_covers_nested_repositories():
+    for path in ("vendor/.git/config", "a/b/.git/hooks/post-index-change", "vendor/.git/config.worktree"):
+        e = FsEntry(op="create", path=path, kind="file", preexisting=False)
+        assert "H9.persistence" in ids(evaluate(rec([e]), Policy())), path

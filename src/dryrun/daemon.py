@@ -159,8 +159,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     cfg = load_config(args.config)
     store = Store(state_dir())
-    for run_id in recover_all(store):
-        log.warning("completed interrupted commit %s", run_id)
+    try:
+        for run_id in recover_all(store):
+            log.warning("completed interrupted commit %s", run_id)
+    except Exception as exc:  # never let a bad journal keep the daemon (and its fail-to-ask gate) down
+        log.error("commit recovery failed: %s", exc)
     problems = preflight(cfg.shadow, allow_root=args.allow_root)
     gate = Gate(ok=None if not problems else False, detail="; ".join(problems) or "pending")
     pipeline = Pipeline(cfg, store, gate=gate)

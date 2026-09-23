@@ -119,12 +119,41 @@ def _is_whiteout(path: Path) -> bool:
     return False
 
 
+REF_CAP = 4096
+PACKED_REFS_CAP = 64 * 1024**2
+
+
+def _safe_read(path: Path, cap: int) -> str | None:
+    """Read a regular file without following symlinks, blocking on FIFOs, or reading without bound.
+    Upper-dir content is produced by the shadowed command, and this runs in the daemon (outside every
+    cgroup), so a planted FIFO or a symlink to /dev/zero must not hang or exhaust it."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > cap:
+            return None
+        return os.read(fd, cap).decode("utf-8", "replace")
+    finally:
+        os.close(fd)
+
+
+def _real_dir(path: Path) -> bool:
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
 def _loose(git_dir: Path) -> dict[str, Path]:
     out: dict[str, Path] = {}
     base = git_dir / "refs"
-    if not base.is_dir():
+    # The upper dir is shadow-controlled: a symlinked .git or refs must not make the daemon walk the host.
+    if not (_real_dir(git_dir) and _real_dir(base)):
         return out
-    for dirpath, _, files in os.walk(base):
+    for dirpath, _, files in os.walk(base):  # os.walk never descends into symlinked subdirectories
         for name in files:
             p = Path(dirpath) / name
             out[p.relative_to(git_dir).as_posix()] = p
@@ -133,9 +162,8 @@ def _loose(git_dir: Path) -> dict[str, Path]:
 
 def _packed(path: Path) -> dict[str, str]:
     refs: dict[str, str] = {}
-    try:
-        text = path.read_text(errors="replace")
-    except (FileNotFoundError, IsADirectoryError):
+    text = _safe_read(path, PACKED_REFS_CAP)
+    if text is None:
         return refs
     for line in text.splitlines():
         if line and line[0] not in "#^" and " " in line:
@@ -149,7 +177,7 @@ def read_refs(git_dir: Path, upper_git_dir: Path | None = None) -> dict[str, str
     git_dir = Path(git_dir)
     if not git_dir.is_dir():
         return {}
-    up = Path(upper_git_dir) if upper_git_dir is not None else None
+    up = Path(upper_git_dir) if upper_git_dir is not None and _real_dir(Path(upper_git_dir)) else None
     packed_file = git_dir / "packed-refs"
     if up is not None and os.path.lexists(up / "packed-refs"):
         packed_file = up / "packed-refs"
@@ -162,14 +190,11 @@ def read_refs(git_dir: Path, upper_git_dir: Path | None = None) -> dict[str, str
         if _is_whiteout(p):
             refs.pop(name, None)
             continue
-        value = p.read_text(errors="replace").strip()
+        value = (_safe_read(p, REF_CAP) or "").strip()
         if len(value) in (40, 64):
             refs[name] = value
     head_file = up / "HEAD" if up is not None and os.path.lexists(up / "HEAD") else git_dir / "HEAD"
-    try:
-        head = head_file.read_text().strip()
-    except FileNotFoundError:
-        head = ""
+    head = (_safe_read(head_file, REF_CAP) or "").strip()
     if head.startswith("ref: "):
         target = head[5:].strip()
         if target in refs:
@@ -193,9 +218,18 @@ def objects_exist(ws_root: Path, shas: set[str]) -> set[str]:
     return found
 
 
+ALT_OBJECTS_MOUNT = "/run/dryrun-shadow-objects"  # inside the /run tmpfs of the read-only sandbox
+
+
 def is_ancestor(ws_root: Path, old: str, new: str, extra_objects: Path | None) -> bool | None:
-    env = {"GIT_ALTERNATE_OBJECT_DIRECTORIES": str(extra_objects)} if extra_objects else {}
-    res = run_readonly(["git", *_SAFE, "merge-base", "--is-ancestor", old, new], cwd=Path(ws_root), env=env)
+    # The shadow's new objects live in the run's upper dir, inside Dry Run's (hidden) state dir: bind them
+    # read-only at a neutral path so commits made in the shadow can be checked for fast-forward.
+    env, binds = {}, ()
+    if extra_objects:
+        env = {"GIT_ALTERNATE_OBJECT_DIRECTORIES": ALT_OBJECTS_MOUNT}
+        binds = ((str(extra_objects), ALT_OBJECTS_MOUNT),)
+    res = run_readonly(["git", *_SAFE, "merge-base", "--is-ancestor", old, new], cwd=Path(ws_root), env=env,
+                       extra_ro_binds=binds)
     if res.returncode == 0:
         return True
     if res.returncode == 1:

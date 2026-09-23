@@ -97,6 +97,14 @@ def test_pipeline_refuses_broad_or_mounted_workspace(env, monkeypatch):
     assert d.decision == "ask" and "mount" in d.reason
 
 
+def test_symlinked_cwd_is_resolved_before_workspace_checks(env, scratch):
+    p, ws, home = env
+    link = scratch / "link-to-home"
+    link.symlink_to(home)
+    d = ask(p, ws, home, "rm -rf x", cwd=link)
+    assert d.decision == "ask" and "S.workspace" in d.rule_ids and "too broad" in d.reason
+
+
 def test_pipeline_lower_changed(env):
     p, ws, home = env
     threading.Timer(1.0, lambda: (ws / "keep.txt").write_text("edited by user\n")).start()
@@ -141,6 +149,23 @@ def test_git_reset_hard_is_caught(env):
     assert d.decision == "ask", d.reason
     assert "H3.ref_rewound" in d.rule_ids and "H1.unrecoverable" in d.rule_ids
     assert (ws / "src" / "main.py").read_text() == "uncommitted work\n"
+
+
+def test_plain_git_commit_is_fast_forward_not_rewound(env):
+    p, ws, home = env
+
+    def g(*a):
+        subprocess.run(["git", "-C", str(ws), *a], check=True, capture_output=True,
+                       env={"PATH": "/usr/bin:/bin", "HOME": str(home), "GIT_AUTHOR_NAME": "t",
+                            "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+
+    g("init", "-q", "-b", "main")
+    g("add", ".")
+    g("commit", "-q", "-m", "one")
+    (ws / "src" / "main.py").write_text("print('two')\n")
+    d = ask(p, ws, home, "git -c user.name=t -c user.email=t@t commit -qam two")
+    assert "H3.ref_rewound" not in d.rule_ids, d.reason
+    assert d.decision == "allow", d.reason
 
 
 def test_workspace_under_tmp(scratch: Path):

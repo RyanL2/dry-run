@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -130,10 +131,18 @@ def _all_argvs(source: str, depth: int = 0) -> list[list[str]]:
 
 
 # --- read-only allowlist ----------------------------------------------------------------------------
+def _matches_flag(arg: str, flag: str) -> bool:
+    """True if `arg` may select `flag`: long options also match any abbreviation (GNU getopt and git's
+    parse-options accept unambiguous prefixes), short options also match inside a cluster like `-qf`."""
+    if flag.startswith("--"):
+        name = arg.split("=", 1)[0]
+        return name.startswith("--") and len(name) > 2 and flag.startswith(name)
+    return arg.startswith("-") and not arg.startswith("--") and flag[1] in arg[1:]
+
+
 def _no(flags: tuple[str, ...]):
     def check(args: list[str]) -> bool:
-        return not any(a == f or a.startswith(f + "=") or (len(f) == 2 and a.startswith(f) and not a.startswith("--"))
-                       for a in args for f in flags)
+        return not any(_matches_flag(a, f) for a in args for f in flags)
     return check
 
 
@@ -142,7 +151,11 @@ def _any(args: list[str]) -> bool:
 
 
 _GIT_READ = {"status", "diff", "log", "show", "branch", "rev-parse", "ls-files", "remote"}
-_GIT_BAD_FLAGS = ("--output", "--ext-diff", "--textconv", "-o")
+# --submodule=diff runs a child git in every nested repo a diff touches, including ones only in history.
+_GIT_BAD_FLAGS = ("--output", "--ext-diff", "--textconv", "--show-signature", "--submodule")
+# Signature placeholders (--pretty %GG/%GS/%G?, ref-filter %(signature...)) verify signatures, which runs gpg
+# or ssh-keygen.
+_GPG_PLACEHOLDERS = ("%G", "%(signature")
 _BRANCH_OK = {"-a", "-r", "-v", "-vv", "--list", "--show-current", "--all", "--remotes", "--merged",
               "--no-merged", "--contains", "--no-contains", "--sort", "--format", "--color", "--no-color",
               "--column", "--no-column", "-l"}
@@ -152,7 +165,9 @@ def _git_ok(args: list[str]) -> bool:
     if not args or args[0] not in _GIT_READ:
         return False
     sub, rest = args[0], args[1:]
-    if any(a == f or a.startswith(f + "=") for a in rest for f in _GIT_BAD_FLAGS):
+    if any(_matches_flag(a, f) for a in rest for f in _GIT_BAD_FLAGS):
+        return False
+    if any(p in a for a in rest for p in _GPG_PLACEHOLDERS):
         return False
     if sub == "branch":
         return all(a in _BRANCH_OK or a.startswith("--sort=") or a.startswith("--format=")
@@ -165,21 +180,60 @@ def _git_ok(args: list[str]) -> bool:
 _ALLOW = {
     "ls": _any, "cat": _any, "head": _any, "wc": _any, "stat": _any, "du": _any, "df": _any, "pwd": _any,
     "echo": _any, "printf": _any, "which": _any, "type": _any, "uname": _any, "whoami": _any, "id": _any,
-    "diff": _any, "cmp": _any, "jq": _any, "realpath": _any, "basename": _any, "dirname": _any, "true": _any,
-    "tail": _no(("-f", "-F", "--follow")), "file": _no(("-C", "--compile")), "tree": _no(("-o",)),
-    "date": _no(("-s", "--set")), "env": lambda a: a == [], "sort": _no(("-o", "--output")),
-    "grep": _no(("--pre",)), "egrep": _any, "fgrep": _any,
-    "rg": _no(("--pre", "--pre-glob", "-z", "--search-zip")),
+    "cmp": _any, "jq": _any, "realpath": _any, "basename": _any, "dirname": _any, "true": _any,
+    "diff": _no(("-l", "--paginate")),  # -l pipes through pr
+    "tail": _no(("-f", "-F", "--follow")),
+    "file": _no(("-C", "--compile", "-z", "-Z", "--uncompress", "--uncompress-noreport")),  # -z execs decompressors
+    "tree": _no(("-o", "-R")),  # -R with -H writes 00Tree.html into every directory
+    "date": _no(("-s", "--set")), "env": lambda a: a == [],
+    "grep": _no(("--pre",)),
+    # sort and rg are deliberately absent: both have flags that execute helper programs
+    # (sort --compress-program, rg --pre/--hostname-bin/--search-zip). They are shadowed instead.
+    # egrep/fgrep are absent: on Debian/Ubuntu they are scripts that look `grep` up in PATH.
 }
+_BUILTINS = {"echo", "printf", "pwd", "type", "true"}  # bash never looks these up in PATH
+_DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin"
+
+
+def _root_owned(path: str) -> bool:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return st.st_uid == 0 and not st.st_mode & 0o022
+
+
+def _system_program(name: str, path_var: str) -> bool:
+    """True if the program bash would run for `name` is a root-owned file in a root-owned directory. A PATH
+    entry the agent can write to (an activated .venv/bin, node_modules/.bin, a relative entry) could hold a
+    program of the same name that would otherwise run outside the shadow."""
+    for d in path_var.split(":"):
+        if not d.startswith("/"):
+            return False  # empty or relative entries resolve against the command's cwd
+        p = os.path.join(d, name)
+        if not (os.path.isfile(p) and os.access(p, os.X_OK)):
+            continue
+        real = os.path.realpath(p)
+        # Every ancestor too: a user-writable ancestor could have the directory renamed and replaced.
+        bases = (os.path.realpath(d), os.path.dirname(real))
+        dirs = {a for b in bases for a in (b, *map(str, Path(b).parents))}
+        return _root_owned(real) and all(_root_owned(x) for x in dirs)
+    return False
 
 
 def _redirect_ok(node: Node) -> bool:
-    """Only `N>/dev/null`, `&>/dev/null` and fd duplications like `2>&1`."""
-    target = [c for c in node.children if c.type in ("word", "number")]
-    if not target:
+    """Only `>/dev/null`-style redirects and fd duplications like `2>&1` / `>&2`. A plain `> 2` writes a
+    file named "2" and is not read-only."""
+    # tree-sitter puts every word after the operator into the destination (`> out /dev/null` has two), and
+    # bash writes to the first, so anything but exactly one destination is refused.
+    dests = [c for c in node.children if c.is_named and c.type != "file_descriptor"]
+    if len(dests) != 1 or dests[0].type not in ("word", "number"):
         return False
-    value = _text(target[-1])
-    return value == "/dev/null" or value.isdigit()
+    value = _text(dests[0])
+    ops = {c.type for c in node.children if not c.is_named}
+    if value == "/dev/null":
+        return True
+    return value.isdigit() and bool(ops & {">&", "<&"})
 
 
 def _structure_ok(node: Node) -> bool:
@@ -198,42 +252,116 @@ def _structure_ok(node: Node) -> bool:
     return True
 
 
-_CONFIG_DANGER = re.compile(r"^\s*\[\s*(filter|include|includeif)\b|^\s*(fsmonitor|external|textconv|command)\s*=",
-                            re.IGNORECASE | re.MULTILINE)
-_DIFF_SECTION = re.compile(r"^\s*\[\s*diff\s*\"", re.IGNORECASE | re.MULTILINE)
+# Keys may follow the section header on the same line (`[core] fsmonitor = x`), so match after `]` too.
+_CONFIG_DANGER = re.compile(
+    r"\[\s*(filter|include|includeif)\b"
+    r"|(^|\])\s*(fsmonitor|external|textconv|command|program|showsignature|hookspath|submodule\w*)\s*(=|$)",
+    re.IGNORECASE | re.MULTILINE)
+_DIFF_SECTION = re.compile(r"\[\s*diff\s*\"", re.IGNORECASE)
+_CONFIG_READ_CAP = 1024 * 1024
 
 
-def git_config_safe(workspace: Path | None, home: Path) -> bool:
+_INDEX_READ_CAP = 64 * 1024**2
+_GITLINK_MODE = (0o160000).to_bytes(4, "big")  # index entry mode of an embedded repository
+
+
+class _Unreadable(Exception):
+    pass
+
+
+def _safe_bytes(path: Path, cap: int) -> bytes | None:
+    """A small regular file's bytes, read without following symlinks or blocking on FIFOs; None if absent.
+    Raises _Unreadable for anything else (not regular, larger than cap, permission denied)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError:
+        raise _Unreadable(str(path)) from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > cap:
+            raise _Unreadable(str(path))
+        return os.read(fd, cap + 1)
+    finally:
+        os.close(fd)
+
+
+def git_config_safe(workspace: Path | None, home: Path, env: dict[str, str] | None = None) -> bool:
+    """True only if no config git will read can make a 'read' command run a program. Anything we cannot
+    resolve reliably (gitfile worktrees, submodules, GIT_* overrides, oversized files) counts as unsafe."""
+    env = env or {}
+    if any(k.startswith("GIT_") for k in env):
+        return False
     files = [Path(home) / ".gitconfig", Path(home) / ".config" / "git" / "config", Path("/etc/gitconfig")]
+    if env.get("XDG_CONFIG_HOME"):
+        files.append(Path(env["XDG_CONFIG_HOME"]) / "git" / "config")
     if workspace is not None:
-        files.append(Path(workspace) / ".git" / "config")
-    for f in files:
-        try:
-            text = f.read_text(errors="replace")
-        except (FileNotFoundError, NotADirectoryError, IsADirectoryError, PermissionError):
-            continue
-        if _CONFIG_DANGER.search(text) or _DIFF_SECTION.search(text):
+        dotgit = Path(workspace) / ".git"
+        if os.path.lexists(dotgit) and not dotgit.is_dir():
+            return False  # gitfile: the real config lives elsewhere
+        # `git status` recurses into submodules, which read .git/modules/<name>/config.
+        if os.path.lexists(Path(workspace) / ".gitmodules") or os.path.lexists(dotgit / "modules"):
             return False
+        # commondir moves the config elsewhere; status/diff rewrite the index, which runs post-index-change.
+        if os.path.lexists(dotgit / "commondir") or os.path.lexists(dotgit / "hooks" / "post-index-change"):
+            return False
+        files += [dotgit / "config", dotgit / "config.worktree"]
+    try:
+        if workspace is not None:
+            # An embedded repo in the index (even without .gitmodules) makes status/diff run a child git in
+            # it, with that repo's own config and hooks. A stray match inside an object id only costs a shadow.
+            index = _safe_bytes(Path(workspace) / ".git" / "index", _INDEX_READ_CAP)
+            if index is not None and _GITLINK_MODE in index:
+                return False
+            # A split index keeps its entries (gitlinks included) in .git/sharedindex.<sha>.
+            if any(n.startswith("sharedindex.") for n in os.listdir(Path(workspace) / ".git")):
+                return False
+        for f in files:
+            raw = _safe_bytes(f, _CONFIG_READ_CAP)
+            if raw is None:
+                continue
+            text = raw.decode("utf-8", "replace")
+            if (_CONFIG_DANGER.search(text) or _DIFF_SECTION.search(text)
+                    or any(p in text for p in _GPG_PLACEHOLDERS)):
+                return False
+    except _Unreadable:
+        return False
     return True
 
 
+def _single_command(root: Node, cmds: list[Node], *, allow_background: bool = False) -> Node | None:
+    """The only command node when the whole program is exactly one simple command (no list, pipe,
+    redirect, subshell or substitution); optionally with a trailing `&`."""
+    if len(cmds) != 1:
+        return None
+    named = [c for c in root.children if c.is_named]
+    anon = [c.type for c in root.children if not c.is_named]
+    if named != [cmds[0]] or any(t not in ("&",) or not allow_background for t in anon):
+        return None
+    return cmds[0]
+
+
 # --- main -------------------------------------------------------------------------------------------
-def classify(command: str, workspace: Path | None, policy: Policy, *, home: Path | None = None) -> Triage:
+def classify(command: str, workspace: Path | None, policy: Policy, *, home: Path | None = None,
+             env: dict[str, str] | None = None) -> Triage:
     home = Path(home) if home is not None else Path.home()
     tree = _PARSER.parse(command.encode("utf-8", "surrogateescape"))
     root = tree.root_node
     if root.has_error:
         return Triage("shadow", "could not parse")
     cmds = _commands(root)
+    issued_by_hook = (env or {}).get("DRYRUN_BIN") or str(home / ".local" / "bin" / "dryrun")
     for cmd in cmds:
         argv = _loose_argv(cmd)
-        if len(argv) >= 2 and os.path.basename(argv[0]) == "dryrun" and argv[1] == "apply":
-            args = argv[2:]
-            run_id = args[0] if args and not args[0].startswith("-") else None
-            token = None
-            if "--token" in args and args.index("--token") + 1 < len(args):
-                token = args[args.index("--token") + 1]
-            return Triage("apply", "dryrun apply", apply_args=(run_id, token) if run_id and token else None)
+        names_dryrun = os.path.basename(argv[0]) == "dryrun" or argv[0] == issued_by_hook if argv else False
+        if len(argv) >= 2 and argv[1] == "apply" and names_dryrun:
+            # Only the exact form the hook itself issues counts; anything else is denied by the cascade.
+            only = _single_command(root, cmds)
+            exact = _argv(only) if only is not None else None
+            ok = (exact is not None and len(exact) == 5 and exact[0] == issued_by_hook
+                  and exact[1] == "apply" and exact[3] == "--token")
+            return Triage("apply", "dryrun apply", apply_args=(exact[2], exact[4]) if ok else None)
     hits = text_hits(_all_argvs(command))
     if hits:
         return Triage("non_shadowable", hits[0].evidence, text=hits)
@@ -246,7 +374,12 @@ def classify(command: str, workspace: Path | None, policy: Policy, *, home: Path
     watch = any(_WATCH.match(x) for a in argvs for x in a[1:])
     bg_cmd = any(a and os.path.basename(a[0]) in _BG for a in argvs)
     if background or dev or follow or watch or bg_cmd:
-        allowed = any(fnmatch.fnmatchcase(command.strip(), pat) for pat in policy.dev_server_allowlist)
+        # The allowlist is matched against the literal argv of a single simple command, never against the
+        # raw string: "uvicorn *" must not allow "uvicorn app; rm -rf ~".
+        only = _single_command(root, cmds, allow_background=True)
+        literal = _argv(only) if only is not None else None
+        allowed = literal is not None and any(fnmatch.fnmatchcase(" ".join(literal), pat)
+                                              for pat in policy.dev_server_allowlist)
         return Triage("long_running", "long-running or background process", dev_server=allowed)
     if cmds and _structure_ok(root):
         ok, uses_git = True, False
@@ -264,6 +397,9 @@ def classify(command: str, workspace: Path | None, policy: Policy, *, home: Path
             elif name not in _ALLOW or not _ALLOW[name](argv[1:]):
                 ok = False
                 break
-        if ok and (not uses_git or git_config_safe(workspace, home)):
+            if name not in _BUILTINS and not _system_program(name, (env or {}).get("PATH") or _DEFAULT_PATH):
+                ok = False
+                break
+        if ok and (not uses_git or git_config_safe(workspace, home, env)):
             return Triage("read_only", "read-only allowlist")
     return Triage("shadow", "effect must be observed")

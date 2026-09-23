@@ -64,7 +64,7 @@ class Policy:
     home_cache_dirs: tuple[str, ...] = (".cache", ".npm", ".cargo/registry", ".local/share/pnpm", "go/pkg/mod")
     secret_paths: tuple[str, ...] = (
         ".ssh", ".aws", ".config/gh", ".netrc", ".docker", ".kube", ".gnupg", ".password-store",
-        ".config/gcloud", ".azure", ".claude/.credentials.json",
+        ".config/gcloud", ".azure", ".claude/.credentials.json", ".git-credentials", ".npmrc", ".pypirc",
     )
     env_denylist: tuple[str, ...] = (
         "*TOKEN*", "*SECRET*", "*KEY*", "*PASSWORD*", "AWS_*", "GH_*", "GITHUB_*", "ANTHROPIC_*", "OPENAI_*",
