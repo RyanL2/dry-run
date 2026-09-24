@@ -112,7 +112,8 @@ class Daemon:
         self.sock_path.parent.mkdir(parents=True, exist_ok=True)
         old = os.umask(0o177)
         try:
-            self._server = await asyncio.start_unix_server(self._handle, path=str(self.sock_path))
+            self._server = await asyncio.start_unix_server(self._handle, path=str(self.sock_path),
+                                                            limit=rpc.MAX_LINE)
         finally:
             os.umask(old)
         threading.Thread(target=self._run_canaries, daemon=True).start()

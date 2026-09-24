@@ -75,3 +75,15 @@ def test_unknown_op(tmp_path: Path):
         assert rpc.call(sock, {"op": "nope"}, 2)["ok"] is False
     finally:
         loop.call_soon_threadsafe(d.stop)
+
+
+def test_request_over_asyncio_default_line_limit(tmp_path: Path):
+    """The hook sends its whole environment; nvm/conda shells easily pass asyncio's 64 KiB default."""
+    d, stub, sock, loop = start(tmp_path)
+    try:
+        req = pre("ls")
+        req["env"] = {"BIG": "x" * (256 * 1024)}
+        r = rpc.call(sock, req, 5)
+        assert (r["decision"], r["mode"]) == ("allow", "passthrough"), r
+    finally:
+        loop.call_soon_threadsafe(d.stop)
