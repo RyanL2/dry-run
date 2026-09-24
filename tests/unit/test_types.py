@@ -6,7 +6,7 @@ from pathlib import Path
 import jsonschema
 import pytest
 
-from dryrun.types import ChangeOp, ChangeSet, Decision, EffectRecord, FsEntry, RefChange
+from dryrun.types import FLAGS, ChangeOp, ChangeSet, Decision, EffectRecord, FsEntry, RefChange
 
 SCHEMAS = Path(__file__).resolve().parents[2] / "schemas"
 
@@ -85,3 +85,10 @@ def test_decision_matches_rpc_schema():
 def test_rpc_requests_match_schema(req):
     schema = load_schema("rpc.schema.json")
     jsonschema.validate(req, {"$ref": "#/$defs/request", "$defs": schema["$defs"]})
+
+
+def test_schema_flags_match_the_flags_the_core_sets():
+    """A sandbox error never produces a record (the pipeline answers S.sandbox_error), so it is not a flag."""
+    enum = load_schema("effect.schema.json")["properties"]["flags"]["items"]["enum"]
+    assert set(enum) == set(FLAGS)
+    assert "sandbox_error" not in FLAGS

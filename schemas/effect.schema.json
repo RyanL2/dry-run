@@ -87,7 +87,7 @@
       "properties": {"path": {"type": "string"}, "where": {"type": "string"}}
     }},
     "flags": {"type": "array", "items": {"enum": ["timeout", "resource_limit", "incomplete_network",
-      "unsupported_entry", "lower_changed", "sandbox_error", "ro_write_blocked", "tmp_partial"]}}
+      "unsupported_entry", "lower_changed", "ro_write_blocked", "tmp_partial"]}}
   },
   "$defs": {
     "entry": {

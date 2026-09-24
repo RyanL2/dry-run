@@ -91,7 +91,7 @@ The shadow must not affect the real system. Treat every shadowed command as host
 | S6 | The daemon writes only inside its state dir (mode 0700) and, during commit, only inside the confined targets. Run-dir cleanup uses fd-relative deletes, and refuses to follow symlinks or leave the state dir. |
 | S7 | The disk watchdog kills the scope when upper growth exceeds `disk_budget` (default 2 GiB) or when free space would fall below `max(5 GiB, 10%)`. It polls every ≤ 50 ms. |
 | S8 | Env passed into the shadow is the hook-supplied env, minus a secret denylist and minus `WSL_INTEROP`, `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`, `DISPLAY`, `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR`. |
-| S9 | Shadow `/tmp`: an overlay whose lower dir is a fresh **copy** of the real `/tmp`, holding only own-uid regular files, dirs and symlinks, capped at 2,000 entries, 64 MiB total and 16 MiB per file (flag `tmp_partial` when capped). Never hard links: the real files' nlink and ctime must not change. A workspace containing a mount point cannot be the lower layer, so the result is `sandbox_error` → `ask` (spike 0). |
+| S9 | Shadow `/tmp`: an overlay whose lower dir is a fresh **copy** of the real `/tmp`, holding only own-uid regular files, dirs and symlinks, capped at 2,000 entries, 64 MiB total and 16 MiB per file (flag `tmp_partial` when capped). Never hard links: the real files' nlink and ctime must not change. A workspace containing a mount point cannot be the lower layer, so the result is a sandbox error (`S.sandbox_error`) → `ask` (spike 0). |
 | S10 | Dry Run never runs repository-controlled code outside the sandbox. Its own git queries (`status`, `ls-files`, `ls-tree`, `merge-base`) run through `sandbox.run_readonly`: bwrap, read-only root, no network, seccomp, with `GIT_OPTIONAL_LOCKS=0`. |
 | S11 | Real `$HOME` is read-only in the shadow and `$HOME` is unchanged. Existing `home_cache_dirs` get throwaway overlays. Writes elsewhere fail with EROFS; stderr matching EROFS sets `ro_write_blocked`. Workspaces equal to `$HOME` or `/`, or containing the state dir, are refused (`ask`). |
 
@@ -157,7 +157,7 @@ design section 2; the examples in ARCHITECTURE show their shape. Summary:
   - `net[]{kind, target}`
   - `procs{count, exec[]}`
   - `decoy_hits[]{path, where}`
-  - `flags[]`, drawn from `timeout`, `resource_limit`, `incomplete_network`, `unsupported_entry`, `lower_changed`, `sandbox_error`, `ro_write_blocked`, `tmp_partial`
+  - `flags[]`, drawn from `timeout`, `resource_limit`, `incomplete_network`, `unsupported_entry`, `lower_changed`, `ro_write_blocked`, `tmp_partial`
 - **`dryrun.changeset/1`:**
   - `run_id`, `workspace_root`
   - `base_digest`

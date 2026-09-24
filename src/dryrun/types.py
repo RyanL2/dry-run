@@ -9,7 +9,7 @@ CHANGESET_SCHEMA = "dryrun.changeset/1"
 
 FLAGS = (
     "timeout", "resource_limit", "incomplete_network", "unsupported_entry",
-    "lower_changed", "sandbox_error", "ro_write_blocked", "tmp_partial",
+    "lower_changed", "ro_write_blocked", "tmp_partial",
 )
 # Flags that mean the shadow result cannot be committed faithfully: ask, and re-run for real if approved.
 RERUN_FLAGS = frozenset(FLAGS) - {"tmp_partial"}
