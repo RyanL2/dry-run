@@ -1,7 +1,7 @@
 # Dry Run — Sub-project 1 (Core) Design Spec
 
 - **Date:** 2026-09-22 (isolation requirements added 2026-09-23)
-- **Status:** implemented as v0.1 (2026-09-23). Plan: `docs/superpowers/plans/2026-09-23-dry-run-core.md`.
+- **Status:** implemented as v0.1 (2026-09-23). The step-by-step implementation plan was removed once implemented; it is in git history.
   Known deviations from this text:
   1. **Scratch `$HOME` replaced.** It became a read-only real home with throwaway cache overlays (S11, spike 0).
   2. **H5 uses canary tokens instead of fanotify.**

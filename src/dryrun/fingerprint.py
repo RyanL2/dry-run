@@ -13,13 +13,6 @@ def fp_of(st: os.stat_result) -> Fp:
     return (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_mode)
 
 
-def lstat_fp(path: str | os.PathLike) -> Fp | None:
-    try:
-        return fp_of(os.lstat(path))
-    except FileNotFoundError:
-        return None
-
-
 def fingerprint_tree(root: Path) -> dict[str, Fp]:
     """Every path under root mapped to its lstat fingerprint. Never follows symlinks and does not
     descend into mount points (the mount point itself is recorded)."""
@@ -59,11 +52,6 @@ def digest(fps: dict[str, Fp]) -> str:
 def subtree(fps: dict[str, Fp], rel: str) -> dict[str, Fp]:
     prefix = rel + "/"
     return {k: v for k, v in fps.items() if k == rel or k.startswith(prefix)}
-
-
-def changed_paths(before: dict[str, Fp], after: dict[str, Fp]) -> set[str]:
-    keys = set(before) | set(after)
-    return {k for k in keys if before.get(k) != after.get(k)}
 
 
 def _unescape_mount(field: str) -> str:

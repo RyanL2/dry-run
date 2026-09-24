@@ -4,7 +4,7 @@ import os
 import time
 from pathlib import Path
 
-from dryrun.fingerprint import changed_paths, digest, fingerprint_tree, lstat_fp, submounts, subtree
+from dryrun.fingerprint import digest, fingerprint_tree, fp_of, submounts, subtree
 
 
 def make_tree(root: Path) -> None:
@@ -18,7 +18,7 @@ def test_fingerprint_tree_lists_all_paths_without_following_symlinks(tmp_path: P
     make_tree(tmp_path)
     fps = fingerprint_tree(tmp_path)
     assert set(fps) == {"a", "a/f.txt", "g.txt", "link"}
-    assert fps["link"] == lstat_fp(tmp_path / "link")
+    assert fps["link"] == fp_of(os.lstat(tmp_path / "link"))
 
 
 def test_digest_is_stable_and_sensitive(tmp_path: Path):
@@ -29,15 +29,6 @@ def test_digest_is_stable_and_sensitive(tmp_path: Path):
     (tmp_path / "g.txt").write_text("changed")
     after = fingerprint_tree(tmp_path)
     assert digest(before) != digest(after)
-    assert changed_paths(before, after) == {"g.txt"}
-
-
-def test_changed_paths_sees_add_and_remove(tmp_path: Path):
-    make_tree(tmp_path)
-    before = fingerprint_tree(tmp_path)
-    (tmp_path / "new").write_text("n")
-    os.unlink(tmp_path / "g.txt")
-    assert changed_paths(before, fingerprint_tree(tmp_path)) == {"new", "g.txt"}
 
 
 def test_subtree_selects_descendants_only(tmp_path: Path):
@@ -45,10 +36,6 @@ def test_subtree_selects_descendants_only(tmp_path: Path):
     (tmp_path / "ab").write_text("not a child of a")
     fps = fingerprint_tree(tmp_path)
     assert set(subtree(fps, "a")) == {"a", "a/f.txt"}
-
-
-def test_lstat_fp_missing_is_none(tmp_path: Path):
-    assert lstat_fp(tmp_path / "nope") is None
 
 
 def test_submounts_parses_mountinfo():
