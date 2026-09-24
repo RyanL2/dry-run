@@ -1,0 +1,10 @@
+.claude/worktrees/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.hypothesis/
+dist/
+build/
+*.egg-info/
+.superpowers/

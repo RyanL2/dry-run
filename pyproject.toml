@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dryrun"
+version = "0.1.0"
+description = "Decide from observed effects before a coding agent's shell command touches real files"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = ["pyyaml>=6", "tree-sitter>=0.23", "tree-sitter-bash>=0.23"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "hypothesis>=6", "jsonschema>=4"]
+
+[project.scripts]
+dryrun = "dryrun.cli:main"
+dryrun-hook = "dryrun.hook:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+dryrun = ["data/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "sandbox: launches real bwrap sandboxes (Linux/WSL, non-root, user namespaces)",
+  "slow: takes more than a few seconds",
+]

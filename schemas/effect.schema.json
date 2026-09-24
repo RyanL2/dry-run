@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dryrun.effect/1",
+  "title": "Dry Run EffectRecord",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "run_id", "session_id", "command", "cwd", "workspace_root", "request", "triage",
+               "exec", "fs", "git", "summary", "net", "procs", "decoy_hits", "flags"],
+  "properties": {
+    "schema": {"const": "dryrun.effect/1"},
+    "run_id": {"type": "string"},
+    "session_id": {"type": "string"},
+    "command": {"type": "string"},
+    "cwd": {"type": "string"},
+    "workspace_root": {"type": "string"},
+    "request": {
+      "type": "object", "additionalProperties": false, "required": ["text", "source"],
+      "properties": {"text": {"type": ["string", "null"]}, "source": {"type": ["string", "null"]}}
+    },
+    "triage": {
+      "type": "object", "additionalProperties": false, "required": ["class", "reason"],
+      "properties": {
+        "class": {"enum": ["read_only", "apply", "non_shadowable", "long_running", "shadow"]},
+        "reason": {"type": "string"}
+      }
+    },
+    "exec": {
+      "type": "object", "additionalProperties": false,
+      "required": ["exit_code", "wall_ms", "timed_out", "stdout_tail", "stderr_tail"],
+      "properties": {
+        "exit_code": {"type": ["integer", "null"]},
+        "wall_ms": {"type": "integer", "minimum": 0},
+        "timed_out": {"type": "boolean"},
+        "stdout_tail": {"type": "string"},
+        "stderr_tail": {"type": "string"}
+      }
+    },
+    "fs": {
+      "type": "object", "additionalProperties": false, "required": ["workspace", "tmp", "home_cache"],
+      "properties": {
+        "workspace": {"type": "array", "items": {"$ref": "#/$defs/entry"}},
+        "tmp": {"type": "array", "items": {"$ref": "#/$defs/entry"}},
+        "home_cache": {
+          "type": "object", "additionalProperties": false, "required": ["files", "bytes"],
+          "properties": {"files": {"type": "integer"}, "bytes": {"type": "integer"}}
+        }
+      }
+    },
+    "git": {
+      "type": "object", "additionalProperties": false,
+      "required": ["is_repo", "refs_changed", "index_changed", "internals_touched", "objects_deleted"],
+      "properties": {
+        "is_repo": {"type": "boolean"},
+        "refs_changed": {"type": "array", "items": {
+          "type": "object", "additionalProperties": false, "required": ["ref", "before", "after", "change"],
+          "properties": {
+            "ref": {"type": "string"},
+            "before": {"type": ["string", "null"]},
+            "after": {"type": ["string", "null"]},
+            "change": {"enum": ["created", "deleted", "fast_forward", "non_fast_forward", "unknown"]}
+          }
+        }},
+        "index_changed": {"type": "boolean"},
+        "internals_touched": {"type": "array", "items": {"type": "string"}},
+        "objects_deleted": {"type": "integer"}
+      }
+    },
+    "summary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["created", "modified", "deleted_preexisting", "deleted_new", "bytes_written", "mode_changes"],
+      "properties": {
+        "created": {"type": "integer"}, "modified": {"type": "integer"},
+        "deleted_preexisting": {"type": "integer"}, "deleted_new": {"type": "integer"},
+        "bytes_written": {"type": "integer"}, "mode_changes": {"type": "integer"}
+      }
+    },
+    "net": {"type": "array", "items": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "target"],
+      "properties": {"kind": {"enum": ["connect", "dns", "send"]}, "target": {"type": "string"}}
+    }},
+    "procs": {
+      "type": "object", "additionalProperties": false, "required": ["count", "exec"],
+      "properties": {"count": {"type": "integer"}, "exec": {"type": "array", "items": {"type": "string"}}}
+    },
+    "decoy_hits": {"type": "array", "items": {
+      "type": "object", "additionalProperties": false, "required": ["path", "where"],
+      "properties": {"path": {"type": "string"}, "where": {"type": "string"}}
+    }},
+    "flags": {"type": "array", "items": {"enum": ["timeout", "resource_limit", "incomplete_network",
+      "unsupported_entry", "lower_changed", "sandbox_error", "ro_write_blocked", "tmp_partial"]}}
+  },
+  "$defs": {
+    "entry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "path", "kind", "preexisting", "in_ledger", "git", "build_output", "discards_work",
+                   "bytes_before", "bytes_after", "mode_before", "mode_after"],
+      "properties": {
+        "op": {"enum": ["create", "modify", "delete", "mode"]},
+        "path": {"type": "string"},
+        "kind": {"enum": ["file", "dir", "symlink", "other"]},
+        "preexisting": {"type": "boolean"},
+        "in_ledger": {"type": "boolean"},
+        "git": {"enum": ["tracked_clean", "tracked_dirty", "untracked", "ignored", null]},
+        "build_output": {"type": "boolean"},
+        "discards_work": {"type": "boolean"},
+        "bytes_before": {"type": ["integer", "null"]},
+        "bytes_after": {"type": ["integer", "null"]},
+        "mode_before": {"type": ["integer", "null"]},
+        "mode_after": {"type": ["integer", "null"]}
+      }
+    }
+  }
+}

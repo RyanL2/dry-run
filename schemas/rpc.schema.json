@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dryrun.rpc/1",
+  "title": "Dry Run hook <-> daemon protocol (one NDJSON request and one response per connection)",
+  "$defs": {
+    "request": {"oneOf": [
+      {"$ref": "#/$defs/prompt_request"}, {"$ref": "#/$defs/pretool_request"}, {"$ref": "#/$defs/status_request"}
+    ]},
+    "prompt_request": {
+      "type": "object", "additionalProperties": false, "required": ["op", "session_id", "text"],
+      "properties": {"op": {"const": "prompt"}, "session_id": {"type": "string"}, "text": {"type": "string"}}
+    },
+    "pretool_request": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "session_id", "cwd", "command", "description", "transcript_path", "env", "deadline_ms"],
+      "properties": {
+        "op": {"const": "pretool"},
+        "session_id": {"type": "string"},
+        "cwd": {"type": "string"},
+        "command": {"type": "string"},
+        "description": {"type": "string"},
+        "transcript_path": {"type": "string"},
+        "env": {"type": "object", "additionalProperties": {"type": "string"}},
+        "deadline_ms": {"type": "integer", "minimum": 0}
+      }
+    },
+    "status_request": {
+      "type": "object", "additionalProperties": false, "required": ["op"],
+      "properties": {"op": {"const": "status"}}
+    },
+    "decision_response": {
+      "type": "object", "additionalProperties": false,
+      "required": ["decision", "mode", "reason", "rule_ids", "run_id", "token"],
+      "properties": {
+        "decision": {"enum": ["allow", "ask", "deny"]},
+        "mode": {"enum": ["commit", "rerun", "passthrough"]},
+        "reason": {"type": "string", "maxLength": 1000},
+        "rule_ids": {"type": "array", "items": {"type": "string"}},
+        "run_id": {"type": ["string", "null"]},
+        "token": {"type": ["string", "null"]}
+      }
+    },
+    "ok_response": {
+      "type": "object", "required": ["ok"],
+      "properties": {"ok": {"type": "boolean"}, "error": {"type": "string"}}
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dryrun.changeset/1",
+  "title": "Dry Run ChangeSet",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "run_id", "roots", "base_digest", "ops", "refused", "committable"],
+  "properties": {
+    "schema": {"const": "dryrun.changeset/1"},
+    "run_id": {"type": "string"},
+    "roots": {"type": "object", "additionalProperties": {"type": "string"}},
+    "base_digest": {"type": "string"},
+    "ops": {"type": "array", "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["seq", "op", "area", "target", "source_upper", "kind", "mode", "base_fp", "subtree_digest",
+                   "link_target", "sha256", "size", "mtime_ns"],
+      "properties": {
+        "seq": {"type": "integer"},
+        "op": {"enum": ["unlink", "rmtree", "mkdir", "rename_in", "symlink", "chmod"]},
+        "area": {"enum": ["workspace", "tmp"]},
+        "target": {"type": "string", "minLength": 1},
+        "source_upper": {"type": ["string", "null"]},
+        "kind": {"enum": ["file", "dir", "symlink", "other"]},
+        "mode": {"type": ["integer", "null"]},
+        "base_fp": {"type": ["array", "null"], "items": {"type": "integer"}, "minItems": 5, "maxItems": 5},
+        "subtree_digest": {"type": ["string", "null"]},
+        "link_target": {"type": ["string", "null"]},
+        "sha256": {"type": ["string", "null"]},
+        "size": {"type": ["integer", "null"]},
+        "mtime_ns": {"type": ["integer", "null"]}
+      }
+    }},
+    "refused": {"type": "array", "items": {
+      "type": "object", "required": ["path", "reason"],
+      "properties": {"path": {"type": "string"}, "reason": {"type": "string"}}
+    }},
+    "committable": {"type": "boolean"}
+  }
+}
