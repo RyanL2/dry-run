@@ -75,6 +75,23 @@ def test_decoy_exposure_is_denied(env):
     assert d.decision == "deny" and d.rule_ids[0] == "H5.decoy"
 
 
+def test_symlinked_secrets_still_shadow_and_deny(scratch: Path):
+    """~/.ssh as a symlink (WSL's /mnt/c, dotfile managers) must not stop the sandbox from starting."""
+    home, keys = scratch / "home", scratch / "dotfiles" / "ssh"
+    keys.mkdir(parents=True)
+    (keys / "id_ed25519").write_text("REAL-PRIVATE-KEY\n")
+    home.mkdir()
+    (home / ".ssh").symlink_to(keys)
+    ws = scratch / "ws"
+    ws.mkdir()
+    cfg = with_shadow(load_config(use_user_file=False), wall_clock_s=15)
+    p = Pipeline(cfg, Store(scratch / "state"), gate=Gate(True, "stub"), home=home)
+    d = ask(p, ws, home, "echo hi > x.txt")
+    assert d.decision == "allow", d.reason
+    d = ask(p, ws, home, "cat ~/.ssh/id_ed25519")
+    assert d.decision == "deny" and d.rule_ids[0] == "H5.decoy", d.reason
+
+
 def test_network_attempt_asks_rerun(env):
     p, ws, home = env
     d = ask(p, ws, home, "python3 -c \"import socket; socket.create_connection(('1.1.1.1', 443), 2)\" || true")

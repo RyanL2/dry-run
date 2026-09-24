@@ -24,16 +24,18 @@ def decoy_text(token: str, name: str) -> str:
 
 
 def make_decoys(decoy_root: Path, home: Path, secret_paths: Iterable[str], token: str) -> list[tuple[str, str]]:
+    """Symlinked secrets (~/.ssh -> /mnt/c/..., dotfile managers) are shadowed at their resolved target, since
+    bwrap cannot mount over a symlink; the symlink then leads to the decoy. Dangling symlinks are skipped."""
     mounts: list[tuple[str, str]] = []
     decoy_root.mkdir(parents=True, exist_ok=True)
     for i, rel in enumerate(secret_paths):
-        real = Path(home) / rel
+        real = Path(os.path.realpath(Path(home) / rel))
         try:
-            st = os.lstat(real)
+            st = os.stat(real)
         except (FileNotFoundError, NotADirectoryError):
             continue
         src = decoy_root / str(i)
-        if stat.S_ISDIR(st.st_mode) or (stat.S_ISLNK(st.st_mode) and real.is_dir()):
+        if stat.S_ISDIR(st.st_mode):
             src.mkdir()
             try:
                 names = sorted(os.listdir(real))[:MAX_DIR_ENTRIES]
@@ -41,7 +43,7 @@ def make_decoys(decoy_root: Path, home: Path, secret_paths: Iterable[str], token
                 names = []
             for name in names:
                 (src / name).write_text(decoy_text(token, f"{rel}/{name}"))
-        elif stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode):
+        elif stat.S_ISREG(st.st_mode):
             src.write_text(decoy_text(token, rel))
         else:
             continue
