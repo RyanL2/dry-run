@@ -141,7 +141,7 @@ def evaluate(rec: EffectRecord, policy: Policy, read: Callable[[str], bytes | No
         hits.append(Hit("H5.decoy", "H5", "deny", "hard",
                         f"exposed a credential decoy via {', '.join(h['where'] for h in rec.decoy_hits[:3])}"))
     if {"timeout", "resource_limit"} & set(rec.flags):
-        hits.append(Hit("H6.resources", "H6", "ask", "hard", "hit a time, memory, process or disk limit"))
+        hits.append(Hit("H6.resources", "H6", "ask", "hard", "hit a time, memory, process, disk or trace-size limit"))
     if "incomplete_network" in rec.flags:
         targets = ", ".join(n["target"] for n in rec.net[:3])
         hits.append(Hit("H7.network", "H7", "ask", "hard", f"tried to use the network ({targets}); shadow is incomplete"))

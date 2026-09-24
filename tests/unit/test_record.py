@@ -66,6 +66,13 @@ def test_compute_flags(tmp_path: Path):
                           "tmp_partial", "ro_write_blocked"}
 
 
+def test_truncated_trace_flags_resource_limit():
+    """A cut-short trace may hide execs and network attempts, so the record cannot be trusted as complete."""
+    flags = compute_flags(res=None, trace=TraceSummary(truncated=True), ws_eff=AreaEffect(), tmp_eff=AreaEffect(),
+                          lower_changed=False, tmp_partial=False, output=b"")
+    assert flags == ["resource_limit"]
+
+
 def test_git_effects_classifies_internals_and_refs(tmp_path: Path):
     ws = tmp_path / "ws"
     (ws / ".git" / "refs" / "heads").mkdir(parents=True)

@@ -95,7 +95,7 @@ def compute_flags(*, res: SpawnResult | None, trace: TraceSummary, ws_eff: AreaE
     flags = []
     if res is not None and res.timed_out:
         flags.append("timeout")
-    if res is not None and res.killed_reason in ("disk", "killed"):
+    if (res is not None and res.killed_reason in ("disk", "killed")) or trace.truncated:
         flags.append("resource_limit")
     if trace.net:
         flags.append("incomplete_network")

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dryrun.sandbox.trace import parse_trace
+from pathlib import Path
+
+from dryrun.sandbox.trace import parse_trace, parse_trace_file
 
 SAMPLE = '''\
 100 execve("/home/u/.local/share/dryrun/bwrap/0.11.0/bwrap", ["bwrap", "--unshare-all"], 0x7ffd /* 5 vars */) = 0
@@ -37,3 +39,14 @@ def test_network_attempts_classified():
 def test_empty_trace():
     s = parse_trace("")
     assert (s.execs, s.pids, s.net, s.unix_connects) == ([], 0, [], [])
+
+
+def test_trace_file_read_is_capped_and_flagged(tmp_path: Path):
+    """A command that execs a lot can leave a trace near the 1 GiB file-size cap; read only the head."""
+    line = '105 execve("/usr/bin/true", ["true"], 0x55 /* 3 vars */) = 0\n'
+    path = tmp_path / "trace"
+    path.write_text(line * 1000)
+    s = parse_trace_file(path, cap=len(line) * 10 + 5)
+    assert s.truncated and len(s.execs) == 9
+    s = parse_trace_file(path, cap=len(line) * 1000)
+    assert not s.truncated and len(s.execs) == 999

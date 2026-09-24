@@ -15,6 +15,8 @@ _V4 = re.compile(r'sa_family=AF_INET, sin_port=htons\((?P<port>\d+)\), sin_addr=
 _V6 = re.compile(r'sa_family=AF_INET6, sin6_port=htons\((?P<port>\d+)\).*?inet_pton\(AF_INET6, "(?P<ip>[^"]+)"')
 _UNIX = re.compile(r'sa_family=AF_UNIX, sun_path=(?P<path>@?"(?:[^"\\]|\\.)*")')
 _RET = re.compile(r"\)\s+=\s+(?P<ret>-?\d+)")
+# Same cap as stdout/stderr: a command that execs a lot can leave a trace near the 1 GiB file-size cap.
+TRACE_MAX = 16 * 1024**2
 
 
 @dataclass
@@ -23,6 +25,7 @@ class TraceSummary:
     pids: int = 0
     net: list[dict] = field(default_factory=list)
     unix_connects: list[str] = field(default_factory=list)
+    truncated: bool = False
 
 
 def _net_entry(call: str, args: str) -> dict | None:
@@ -86,8 +89,16 @@ def parse_trace(text: str) -> TraceSummary:
     return s
 
 
-def parse_trace_file(path: Path) -> TraceSummary:
+def parse_trace_file(path: Path, cap: int = TRACE_MAX) -> TraceSummary:
+    """Parse at most `cap` bytes, dropping a partial last line; `truncated` marks a trace cut short."""
     try:
-        return parse_trace(Path(path).read_text(errors="replace"))
+        with open(path, "rb") as f:
+            data = f.read(cap + 1)
     except FileNotFoundError:
         return TraceSummary()
+    truncated = len(data) > cap
+    if truncated:
+        data = data[:data.rfind(b"\n", 0, cap) + 1]
+    s = parse_trace(data.decode(errors="replace"))
+    s.truncated = truncated
+    return s
