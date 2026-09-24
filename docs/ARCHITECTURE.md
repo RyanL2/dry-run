@@ -28,6 +28,7 @@ flowchart LR
     H -- "RPC, deadline" --> D[dryrund]
     D --> T[Static triage]
     T -- "read-only" --> A1[allow, run as-is]
+    T -- "git read" --> GR["read-only sandbox<br/>allow, replay output"]
     T -- "not shadowable" --> TX["text rules<br/>default ask"]
     T -- "everything else" --> S["Shadow run<br/>overlay + no net"]
     S --> E[Effect record]
@@ -124,7 +125,7 @@ flowchart LR
 |---|---|---|---|
 | `hook` | Translate Claude Code hook JSON ⇄ RPC; **any fault → `ask`** | stdlib only | Claude Code |
 | `rpc` | NDJSON over `$XDG_RUNTIME_DIR/dryrun.sock`, per-request deadline | asyncio | hook |
-| `triage` | Parse with tree-sitter-bash; classify `read_only` / `apply` / `non_shadowable` / `long_running` / `shadow` | tree-sitter-bash | daemon |
+| `triage` | Parse with tree-sitter-bash; classify `read_only` / `git_read` / `apply` / `non_shadowable` / `long_running` / `shadow` | tree-sitter-bash | daemon |
 | `sandbox` | Build and run the bwrap invocation; collect raw artifacts | vendored bwrap ≥ 0.11.1, strace | effects |
 | `fingerprint` | Stat-walk `(ino,size,mtime_ns,ctime_ns,mode)`; racy-mtime hashing | os | sandbox, commit |
 | `effects` | Upper dir → `ChangeSet` (noise-filtered) + `EffectRecord` | fingerprint, gitstate | judge, commit |
@@ -141,6 +142,7 @@ flowchart LR
 flowchart TD
     IN[pretool request] --> TA{triage class}
     TA -- read_only --> R1["allow + passthrough"]
+    TA -- git_read --> RG["run in read-only sandbox<br/>allow + commit of an empty ChangeSet (replays output)"]
     TA -- "apply typed by agent" --> R2["deny: only Dry Run may issue apply"]
     TA -- non_shadowable --> TXR{text rules}
     TXR --> R3["ask + passthrough<br/>never allow in v1"]
@@ -393,7 +395,8 @@ already-applied rename finds the target in its final state and skips it.
 8. The read-only fast path, which runs *without* a shadow, uses an **allowlist of commands and flags**,
    not a denylist. For example `sort -o`, `rg --pre`, `git -c`, `git diff --ext-diff`, `find`, `less`
    and any redirect or substitution are all excluded. Anything the allowlist doesn't cover goes to the
-   shadow.
+   shadow. Git reads are never on the native fast path: they run in the read-only sandbox and their
+   output is replayed (`git_read`), because git config can make any "read" start a program.
 
 ## 11. Known limits (stated in the README)
 

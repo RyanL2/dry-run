@@ -61,7 +61,7 @@ Build a local gate for Claude Code's Bash tool. Before a command runs for real, 
 |---|---|
 | F1 | `dryrun-hook prompt` stores `{session_id → latest prompt text}` in the daemon. It never blocks the prompt: on error it exits 0 with no output. |
 | F2 | `dryrun-hook pretool` sends `{session_id, cwd, command, description, transcript_path, env (filtered), deadline_ms}` and prints a valid `hookSpecificOutput` JSON on stdout. It always exits 0. |
-| F3 | Triage sorts commands into `read_only`, `apply`, `non_shadowable`, `long_running` or `shadow` (details in §4). A command that can't be parsed goes to `shadow`. |
+| F3 | Triage sorts commands into `read_only`, `git_read`, `apply`, `non_shadowable`, `long_running` or `shadow` (details in §4). A command that can't be parsed goes to `shadow`. |
 | F4 | Shadow run, following the layout in ARCHITECTURE §7. Captures: exit code, wall time, stdout/stderr (full output kept for replay, a 4 KiB tail in the record), upper dirs, the strace log (execve/connect/sendto/sendmsg, with strace running outside bwrap) and canary-token hits from the decoys. |
 | F5 | The effects extractor produces a `ChangeSet` (`dryrun.changeset/1`) and an `EffectRecord` (`dryrun.effect/1`). It follows the upper-dir rules table in ARCHITECTURE §7, filters out copy-ups that changed nothing, and handles both whiteout forms. |
 | F6 | Git state: per-path recoverability and a before/after snapshot of refs (`git for-each-ref`, HEAD, stash list). Runs only when the workspace is a git repo. |
@@ -124,10 +124,14 @@ The shadow must not affect the real system. Treat every shadowed command as host
   | `git status`, `git diff`, `git log`, `git show`, `git branch` (list forms only), `git rev-parse`, `git ls-files`, `git remote -v` | no `-c`, no `--output`, no `--ext-diff`, no `--textconv` |
   | `sort` | no `-o` |
 
-  Git read commands go through the fast path only when the repo's effective config (cached, keyed on
-  the mtimes of the config files) sets none of `core.fsmonitor`, `diff.external`, `diff.*.command`,
-  `diff.*.textconv` or `filter.*`. Any of these lets a "read" run a program, so the command is shadowed
-  instead.
+  Commands that include a git read are class **`git_read`**, not `read_only`: they never run natively.
+  Git config (repo, user, system, `GIT_*` env, and whichever repo git's own discovery picks) can make a
+  "read" start programs: fsmonitor, textconv, hooks, credential helpers, promisor fetches in partial
+  clones. Earlier versions tried to rule these out by scanning config, and every review round found one
+  more. Now the whole command runs in the `run_readonly` sandbox (read-only root, no network, seccomp,
+  secrets and state hidden, cgroup limits). The result is `allow + commit` with an empty ChangeSet, so
+  `dryrun apply` only replays stdout, stderr and the exit code. A timeout or output over `output_max`
+  gives `ask + passthrough` (`S.git_read_incomplete`); a sandbox that fails to start gives `ask`.
 
 - **`apply`:** argv[0] is `dryrun` and argv[1] is `apply`.
 - **`non_shadowable`:** harm-policy T1–T6 patterns on the parsed argv, including inside `bash -c` or

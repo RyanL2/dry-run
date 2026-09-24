@@ -22,9 +22,9 @@ from dryrun.judge.model import EffectJudge, NullJudge
 from dryrun.judge.rules import evaluate
 from dryrun.paths import bwrap_path
 from dryrun.runpaths import RunPaths
-from dryrun.sandbox.assemble import prepare
+from dryrun.sandbox.assemble import filter_env, prepare
 from dryrun.sandbox.decoys import scan
-from dryrun.sandbox.spawn import SandboxError, run_shadow
+from dryrun.sandbox.spawn import SandboxError, run_readonly_command, run_shadow
 from dryrun.sandbox.trace import parse_trace_file
 from dryrun.store import Store, TokenError
 from dryrun.triage import classify
@@ -125,6 +125,8 @@ class Pipeline:
             if tri.apply_args and self._token_valid(*tri.apply_args, session_id):
                 return Decision("allow", "passthrough", "commit of a reviewed Dry Run result"), None
             return decide("apply"), None
+        if tri.cls == "git_read":
+            return self._git_read(env, cwd, session_id, command, cancel, timings), None
         if tri.cls != "shadow":
             return decide(tri.cls, triage_reason=tri.reason, text=tri.text, dev_server_allowed=tri.dev_server), None
         problem = self._workspace_problem(ws_root)
@@ -145,6 +147,48 @@ class Pipeline:
             self.store.finish(run, "failed")
             self.store.remove_run(run)
             raise
+
+    def _git_read(self, env: dict[str, str], cwd: Path, session_id: str, command: str,
+                  cancel: threading.Event | None, timings: dict) -> Decision:
+        """Run a read-only git command in the read-only sandbox and allow replaying its output. Nothing is
+        committed (the ChangeSet is empty); `dryrun apply` only replays stdout/stderr and the exit code."""
+        if not cwd.is_dir():
+            return Decision("ask", "passthrough", f"working directory {cwd} does not exist", ["S.workspace"])
+        if self.gate.ok is not True:
+            return Decision("ask", "passthrough", f"Dry Run isolation self-test failed or pending: {self.gate.detail}",
+                            ["S.canary"])
+        cfg = self.cfg
+        run = self.store.new_run()
+        env = filter_env(env, cfg.policy.env_denylist)
+        env.setdefault("HOME", str(self.home))
+        t = time.monotonic()
+        try:
+            res = run_readonly_command(command, cwd=cwd, env=env, home=self.home, out_dir=run.root,
+                                       timeout=cfg.shadow.wall_clock_s, output_max=cfg.shadow.output_max,
+                                       secret_paths=cfg.policy.secret_paths, hide=(str(self.store.root),),
+                                       cancel=cancel)
+        except SandboxError as exc:
+            self.store.finish(run, "failed")
+            self.store.remove_run(run)
+            return Decision("ask", "passthrough", f"Dry Run sandbox error: {str(exc)[:150]}", ["S.sandbox_error"],
+                            run_id=run.run_id)
+        except BaseException:
+            self.store.finish(run, "failed")
+            self.store.remove_run(run)
+            raise
+        timings["run"] = int((time.monotonic() - t) * 1000)
+        if res.killed_reason or res.truncated:
+            self.store.finish(run, "passthrough")
+            self.store.remove_run(run)
+            why = res.killed_reason or f"output over {cfg.shadow.output_max} bytes"
+            return Decision("ask", "passthrough", f"git read incomplete in the read-only sandbox ({why}); approving "
+                            "runs it outside the sandbox", ["S.git_read_incomplete"], run_id=run.run_id)
+        cs = ChangeSet(run_id=run.run_id, roots={}, base_digest="", ops=[])
+        run.changeset.write_text(json.dumps(cs.to_json()))
+        token = self.store.authorize(run, session_id=session_id, decision="allow")
+        self.store.save_meta(run, exit_code=res.exit_code)
+        return Decision("allow", "commit", "read-only git command, run in the read-only sandbox; output replayed",
+                        run_id=run.run_id, token=token)
 
     def _shadow(self, run: RunPaths, req: dict, tri, ws_root: Path, cwd: Path, session_id: str, command: str,
                 cancel: threading.Event | None, timings: dict) -> tuple[Decision, dict]:

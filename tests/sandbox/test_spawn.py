@@ -119,3 +119,26 @@ def test_run_readonly_cannot_write_and_returns_output(ws):
     assert ok.stdout == b"ok\n"
     assert ok.returncode != 0
     assert not (ws / "x").exists()
+
+
+def test_run_readonly_command_reports_a_sandbox_that_did_not_start(scratch):
+    """bwrap's own error must never be replayed to the agent as if the command had printed it."""
+    from dryrun.sandbox.spawn import run_readonly_command
+    out = scratch / "out"
+    out.mkdir()
+    with pytest.raises(SandboxError):
+        run_readonly_command("git status", cwd=scratch / "missing", env={}, home=scratch, out_dir=out,
+                             timeout=10, output_max=1 << 20)
+
+
+def test_run_readonly_command_caps_output_and_keeps_exit_code(scratch):
+    from dryrun.sandbox.spawn import run_readonly_command
+    out = scratch / "out"
+    out.mkdir()
+    r = run_readonly_command("echo hi; echo err >&2; exit 3", cwd=scratch, env={}, home=scratch, out_dir=out,
+                             timeout=10, output_max=1 << 20)
+    assert (r.exit_code, r.truncated, r.killed_reason) == (3, False, None)
+    assert r.stdout_path.read_bytes() == b"hi\n" and r.stderr_path.read_bytes() == b"err\n"
+    big = run_readonly_command("head -c 100000 /dev/zero", cwd=scratch, env={}, home=scratch, out_dir=out,
+                               timeout=10, output_max=1000)
+    assert big.truncated and big.stdout_path.stat().st_size <= 1001

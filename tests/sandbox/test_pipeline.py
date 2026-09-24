@@ -179,3 +179,103 @@ def test_workspace_under_tmp(scratch: Path):
         assert apply(p, d)[0] == 0 and (ws / "made.txt").exists()
     finally:
         subprocess.run(["rm", "-rf", str(ws.parent)])
+
+
+# --- git reads run in the read-only sandbox, never natively -------------------------------------------
+GIT_ENV = {"PATH": "/usr/bin:/bin", "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+
+def _repo(ws: Path, home: Path) -> None:
+    for a in (["init", "-q", "-b", "main"], ["add", "."], ["commit", "-q", "-m", "first commit"]):
+        subprocess.run(["git", "-C", str(ws), *a], check=True, capture_output=True, env={**GIT_ENV, "HOME": str(home)})
+
+
+def _plant_fsmonitor(repo: Path, markers: list[Path]) -> None:
+    """core.fsmonitor names a program that `git status` runs; it stands in for every config-driven program
+    (textconv, credential helpers, uploadpack in partial clones, ...)."""
+    hook = repo / ".git" / "fsmon.sh"
+    hook.write_text("#!/bin/sh\ntouch " + " ".join(str(m) for m in markers) + "\n")
+    hook.chmod(0o755)
+    subprocess.run(["git", "-C", str(repo), "config", "core.fsmonitor", str(hook)], check=True)
+
+
+def test_git_read_runs_in_the_readonly_sandbox_and_replays_output(env):
+    p, ws, home = env
+    _repo(ws, home)
+    d = ask(p, ws, home, "git log --oneline")
+    assert (d.decision, d.mode) == ("allow", "commit") and d.token, d.reason
+    code, out, _ = apply(p, d)
+    assert code == 0 and b"first commit" in out
+
+
+def test_git_config_programs_cannot_touch_the_real_system(env):
+    p, ws, home = env
+    _repo(ws, home)
+    markers = [home / "pwned", ws / "pwned"]
+    _plant_fsmonitor(ws, markers)
+    native = subprocess.run(["git", "status"], cwd=ws, capture_output=True, env={**GIT_ENV, "HOME": str(home)})
+    assert native.returncode == 0 and all(m.exists() for m in markers), "the planted program must really run"
+    for m in markers:
+        m.unlink()
+    d = ask(p, ws, home, "git status")
+    assert (d.decision, d.mode) == ("allow", "commit"), d.reason
+    code, out, _ = apply(p, d)
+    assert code == 0 and b"branch main" in out
+    assert not any(m.exists() for m in markers)
+
+
+def test_git_read_from_a_subdirectory_with_an_invalid_dotgit(env):
+    """Round 7: git skips an invalid pkg/.git and uses the repo above, whose config starts a program."""
+    p, ws, home = env
+    _repo(ws, home)
+    markers = [home / "pwned", ws / "pwned"]
+    _plant_fsmonitor(ws, markers)
+    (ws / "pkg" / ".git").mkdir(parents=True)
+    d = ask(p, ws, home, "git status", cwd=ws / "pkg")
+    assert d.decision == "allow", d.reason
+    assert apply(p, d)[0] == 0
+    assert not any(m.exists() for m in markers)
+
+
+def test_git_status_outside_a_repo_replays_the_git_error(env):
+    p, ws, home = env
+    d = ask(p, ws, home, "git status")
+    assert (d.decision, d.mode) == ("allow", "commit"), d.reason
+    code, _, err = apply(p, d)
+    assert code == 128 and b"not a git repository" in err
+
+
+def test_git_read_with_oversized_output_asks(env):
+    p, ws, home = env
+    (ws / "big.txt").write_text("x" * 4096 + "\n")
+    _repo(ws, home)
+    p.cfg = with_shadow(p.cfg, output_max=1024)
+    d = ask(p, ws, home, "git show HEAD")
+    assert (d.decision, d.mode) == ("ask", "passthrough") and "S.git_read_incomplete" in d.rule_ids, d.reason
+
+
+# --- the brief's text-guard bypasses (anthropics/claude-code#85274, GuardFall) end to end ---------------
+BYPASSES = {
+    "85274 bash script": "bash clean.sh",
+    "85274 python -c rmtree": "python3 -c 'import shutil; shutil.rmtree(\"src\")'",
+    "85274 find -delete": "find src -name '*.py' -delete",
+    "85274 xargs rm": "ls src/*.py | xargs rm",
+    "85274 variable flags": "V=-rf; rm $V src",
+    "GuardFall quote removal": "r''m -rf src",
+    "GuardFall IFS": "rm${IFS}-rf${IFS}src",
+    "GuardFall command substitution": "$(echo rm) -rf src",
+    "GuardFall encoded pipeline": "echo cm0gLXJmIHNyYw== | base64 -d | sh",
+    "GuardFall flag variant": "rm --recursive --force src",
+    "GuardFall other binary": "perl -e 'use File::Path; rmtree(\"src\")'",
+    "truncation": ": > src/main.py",
+}
+
+
+@pytest.mark.parametrize("name", list(BYPASSES))
+def test_text_guard_bypasses_are_caught_by_their_effect(env, name):
+    p, ws, home = env
+    (ws / "clean.sh").write_text("#!/bin/sh\nrm -rf src\n")
+    d = ask(p, ws, home, BYPASSES[name])
+    assert d.decision == "ask" and "H1.unrecoverable" in d.rule_ids, (d.decision, d.reason)
+    assert (ws / "src" / "main.py").read_text() == "print('hi')\n"

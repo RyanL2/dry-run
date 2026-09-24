@@ -5,7 +5,6 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
-import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -252,84 +251,6 @@ def _structure_ok(node: Node) -> bool:
     return True
 
 
-# Keys may follow the section header on the same line (`[core] fsmonitor = x`), so match after `]` too.
-_CONFIG_DANGER = re.compile(
-    r"\[\s*(filter|include|includeif)\b"
-    r"|(^|\])\s*(fsmonitor|external|textconv|command|program|showsignature|hookspath|submodule\w*)\s*(=|$)",
-    re.IGNORECASE | re.MULTILINE)
-_DIFF_SECTION = re.compile(r"\[\s*diff\s*\"", re.IGNORECASE)
-_CONFIG_READ_CAP = 1024 * 1024
-
-
-_INDEX_READ_CAP = 64 * 1024**2
-_GITLINK_MODE = (0o160000).to_bytes(4, "big")  # index entry mode of an embedded repository
-
-
-class _Unreadable(Exception):
-    pass
-
-
-def _safe_bytes(path: Path, cap: int) -> bytes | None:
-    """A small regular file's bytes, read without following symlinks or blocking on FIFOs; None if absent.
-    Raises _Unreadable for anything else (not regular, larger than cap, permission denied)."""
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-    except (FileNotFoundError, NotADirectoryError):
-        return None
-    except OSError:
-        raise _Unreadable(str(path)) from None
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_size > cap:
-            raise _Unreadable(str(path))
-        return os.read(fd, cap + 1)
-    finally:
-        os.close(fd)
-
-
-def git_config_safe(workspace: Path | None, home: Path, env: dict[str, str] | None = None) -> bool:
-    """True only if no config git will read can make a 'read' command run a program. Anything we cannot
-    resolve reliably (gitfile worktrees, submodules, GIT_* overrides, oversized files) counts as unsafe."""
-    env = env or {}
-    if any(k.startswith("GIT_") for k in env):
-        return False
-    files = [Path(home) / ".gitconfig", Path(home) / ".config" / "git" / "config", Path("/etc/gitconfig")]
-    if env.get("XDG_CONFIG_HOME"):
-        files.append(Path(env["XDG_CONFIG_HOME"]) / "git" / "config")
-    if workspace is not None:
-        dotgit = Path(workspace) / ".git"
-        if os.path.lexists(dotgit) and not dotgit.is_dir():
-            return False  # gitfile: the real config lives elsewhere
-        # `git status` recurses into submodules, which read .git/modules/<name>/config.
-        if os.path.lexists(Path(workspace) / ".gitmodules") or os.path.lexists(dotgit / "modules"):
-            return False
-        # commondir moves the config elsewhere; status/diff rewrite the index, which runs post-index-change.
-        if os.path.lexists(dotgit / "commondir") or os.path.lexists(dotgit / "hooks" / "post-index-change"):
-            return False
-        files += [dotgit / "config", dotgit / "config.worktree"]
-    try:
-        if workspace is not None:
-            # An embedded repo in the index (even without .gitmodules) makes status/diff run a child git in
-            # it, with that repo's own config and hooks. A stray match inside an object id only costs a shadow.
-            index = _safe_bytes(Path(workspace) / ".git" / "index", _INDEX_READ_CAP)
-            if index is not None and _GITLINK_MODE in index:
-                return False
-            # A split index keeps its entries (gitlinks included) in .git/sharedindex.<sha>.
-            if any(n.startswith("sharedindex.") for n in os.listdir(Path(workspace) / ".git")):
-                return False
-        for f in files:
-            raw = _safe_bytes(f, _CONFIG_READ_CAP)
-            if raw is None:
-                continue
-            text = raw.decode("utf-8", "replace")
-            if (_CONFIG_DANGER.search(text) or _DIFF_SECTION.search(text)
-                    or any(p in text for p in _GPG_PLACEHOLDERS)):
-                return False
-    except _Unreadable:
-        return False
-    return True
-
-
 def _single_command(root: Node, cmds: list[Node], *, allow_background: bool = False) -> Node | None:
     """The only command node when the whole program is exactly one simple command (no list, pipe,
     redirect, subshell or substitution); optionally with a trailing `&`."""
@@ -400,6 +321,11 @@ def classify(command: str, workspace: Path | None, policy: Policy, *, home: Path
             if name not in _BUILTINS and not _system_program(name, (env or {}).get("PATH") or _DEFAULT_PATH):
                 ok = False
                 break
-        if ok and (not uses_git or git_config_safe(workspace, home, env)):
+        if ok and uses_git:
+            # Git config (repo, user, system, GIT_* env, and repos git discovers on its own) can make a
+            # read start programs: fsmonitor, textconv, credential helpers, promisor fetches... Instead of
+            # predicting that, git reads run in the read-only, network-less sandbox and their output is replayed.
+            return Triage("git_read", "read-only git command, run in the read-only sandbox")
+        if ok:
             return Triage("read_only", "read-only allowlist")
     return Triage("shadow", "effect must be observed")
