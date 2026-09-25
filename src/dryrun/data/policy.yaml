@@ -1,0 +1,24 @@
+# Dry Run default policy (spec §7). ~/.config/dryrun/policy.yaml overrides individual keys.
+shadow:
+  wall_clock_s: 30
+  memory_max: 2G
+  tasks_max: 512
+  nice: 19
+  ionice_class: idle          # WSL delegates only memory+pids cgroup controllers (spike 0)
+  file_size_max: 1G
+  disk_budget: 2G
+  free_space_floor: {abs: 5G, frac: 0.10}
+  require_cgroup: true
+  canary_interval_h: 6
+  tmp_snapshot: {max_entries: 2000, max_total: 64M, max_file: 16M}
+  output_max: 16M
+  max_concurrent: 2
+h1: {mass_threshold: 20, overwrite_fraction: 0.9}
+h4: {mass_threshold: 20}
+build_output_dirs: [build, dist, target, out, node_modules, __pycache__, .venv, .pytest_cache, .mypy_cache, .next, coverage]
+home_cache_dirs: [.cache, .npm, .cargo/registry, .local/share/pnpm, go/pkg/mod]
+secret_paths: [.ssh, .aws, .config/gh, .netrc, .docker, .kube, .gnupg, .password-store, .config/gcloud, .azure, .claude/.credentials.json, .git-credentials, .npmrc, .pypirc]
+env_denylist: ["*TOKEN*", "*SECRET*", "*KEY*", "*PASSWORD*", "AWS_*", "GH_*", "GITHUB_*", "ANTHROPIC_*", "OPENAI_*"]
+dev_server_allowlist: ["npm run dev", "npm start", "vite", "next dev", "uvicorn *", "python -m http.server *"]
+protected_paths: []
+pending_ttl_min: 15
