@@ -23,6 +23,7 @@ def test_default_values_match_spec():
     assert cfg.policy.h1_mass_threshold == 20
     assert ".ssh" in cfg.policy.secret_paths
     assert "node_modules" in cfg.policy.build_output_dirs
+    assert "research/frozen/*" in cfg.policy.protected_paths
 
 
 def test_user_file_overrides_nested_keys(tmp_path: Path):

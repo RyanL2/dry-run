@@ -72,7 +72,8 @@ class Policy:
     dev_server_allowlist: tuple[str, ...] = (
         "npm run dev", "npm start", "vite", "next dev", "uvicorn *", "python -m http.server *",
     )
-    protected_paths: tuple[str, ...] = ()
+    protected_paths: tuple[str, ...] = ("research/frozen", "research/frozen/*", "research/frozen.lock.json",
+                                      "research/evaluate.py")
     pending_ttl_min: float = 15.0
 
 

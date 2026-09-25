@@ -92,3 +92,9 @@ def test_schema_flags_match_the_flags_the_core_sets():
     enum = load_schema("effect.schema.json")["properties"]["flags"]["items"]["enum"]
     assert set(enum) == set(FLAGS)
     assert "sandbox_error" not in FLAGS
+
+
+def test_effect_schema_accepts_git_read_triage():
+    rec = sample_record()
+    rec.triage_class = "git_read"
+    jsonschema.validate(rec.to_json(), load_schema("effect.schema.json"))

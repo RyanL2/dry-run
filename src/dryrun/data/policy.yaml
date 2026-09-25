@@ -20,5 +20,5 @@ home_cache_dirs: [.cache, .npm, .cargo/registry, .local/share/pnpm, go/pkg/mod]
 secret_paths: [.ssh, .aws, .config/gh, .netrc, .docker, .kube, .gnupg, .password-store, .config/gcloud, .azure, .claude/.credentials.json, .git-credentials, .npmrc, .pypirc]
 env_denylist: ["*TOKEN*", "*SECRET*", "*KEY*", "*PASSWORD*", "AWS_*", "GH_*", "GITHUB_*", "ANTHROPIC_*", "OPENAI_*"]
 dev_server_allowlist: ["npm run dev", "npm start", "vite", "next dev", "uvicorn *", "python -m http.server *"]
-protected_paths: []
+protected_paths: [research/frozen, "research/frozen/*", research/frozen.lock.json, research/evaluate.py]
 pending_ttl_min: 15

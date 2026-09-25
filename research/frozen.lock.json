@@ -1,0 +1,8 @@
+{
+  "sha256": {
+    "research/frozen/__init__.py": "01700706689b636b433af92b79184e0a393791db8d5b3428aac272387b9a5f36",
+    "research/frozen/evaluator.py": "03c2df719d92f2734a96c254d0b13c3915198aab0c39c56659719908b38c77b0",
+    "research/evaluate.py": "c4b2b8045c185b72ae1bb91e079b7b5af0a34c4ad8aedb5cea7762d491e8acad",
+    "schemas/effect.schema.json": "a51578dd23deecebc81fb1f2c167bf3a868d285f43cf97dc517db8d4cb13ea82"
+  }
+}
