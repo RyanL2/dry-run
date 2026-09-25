@@ -3,6 +3,8 @@ exact production layout)."""
 from __future__ import annotations
 
 import fnmatch
+import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -52,12 +54,17 @@ def prepare(run: RunPaths, *, ws_root: Path, cwd: Path, command: str, env: dict[
             home: Path, state: Path, bwrap: str) -> Prepared:
     run.create()
     ws_root, home = Path(ws_root), Path(home)
+    # Overlay upper roots start at 0700. Match their lower roots so an explicit
+    # chmod to 0700 cannot be mistaken for that initial mode.
+    os.chmod(run.ws_up, stat.S_IMODE(os.lstat(ws_root).st_mode))
     ws_base = fingerprint_tree(ws_root)
     s = cfg.shadow
     tmp_root = Path("/tmp")
     exclude = ws_root if _inside(ws_root, tmp_root) else None
     tmp = snapshot_tmp(run.tmp_lower, tmp_root, max_entries=s.tmp_max_entries, max_total=s.tmp_max_total,
                        max_file=s.tmp_max_file, exclude=exclude)
+    os.chmod(run.tmp_lower, stat.S_IMODE(os.lstat(tmp_root).st_mode))
+    os.chmod(run.tmp_up, stat.S_IMODE(os.lstat(tmp_root).st_mode))
     tmp_skip = frozenset({str(ws_root.relative_to(tmp_root))}) if exclude else frozenset()
     token = new_token()
     decoys = make_decoys(run.decoys, home, cfg.policy.secret_paths, token)

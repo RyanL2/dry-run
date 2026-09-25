@@ -237,11 +237,11 @@ class _Extractor:
         self._refuse(rel, "special_file")
 
     def run(self, seq_start: int) -> AreaEffect:
-        # The upper root is never visited, so a `chmod .` shows up only as its mode: Dry Run creates it 0700,
-        # and it may equal the real root's mode; anything else is a root mode change we cannot commit.
+        # The upper root is never visited. Its initial mode matches the lower
+        # root, so any difference is a root mode change we cannot commit.
         root_mode = stat.S_IMODE(os.lstat(self.upper).st_mode)
         low = _lstat(self.lower)
-        if root_mode not in (0o700, stat.S_IMODE(low.st_mode) if low is not None else 0o700):
+        if low is not None and root_mode != stat.S_IMODE(low.st_mode):
             self._refuse(".", "workspace_root_mode")
             os.chmod(self.upper, root_mode | 0o700)
         stack = [""]

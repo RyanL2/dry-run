@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import io
+import os
+import stat
 import subprocess
+import tempfile
 import threading
 import uuid
 from pathlib import Path
@@ -52,6 +55,29 @@ def test_allow_commit_round_trip(env):
     code, out, _ = apply(p, d)
     assert code == 0 and out == b"done\n"
     assert (ws / "out.txt").read_text() == "generated\n"
+
+
+def test_workspace_root_chmod_to_upper_default_is_not_lost(env):
+    p, ws, home = env
+    assert stat.S_IMODE(os.lstat(ws).st_mode) == 0o755
+    d = ask(p, ws, home, "chmod 700 .")
+    assert d.decision == "ask", d.reason
+    assert stat.S_IMODE(os.lstat(ws).st_mode) == 0o755
+
+
+def test_tmp_directory_chmod_is_committed(env):
+    p, ws, home = env
+    path = Path(tempfile.mkdtemp(prefix="dryrun-mode-"))
+    os.chmod(path, 0o500)
+    try:
+        d = ask(p, ws, home, f"chmod 700 {path}")
+        assert d.decision == "allow" and d.mode == "commit", d.reason
+        assert stat.S_IMODE(os.lstat(path).st_mode) == 0o500
+        assert apply(p, d)[0] == 0
+        assert stat.S_IMODE(os.lstat(path).st_mode) == 0o700
+    finally:
+        os.chmod(path, 0o700)
+        path.rmdir()
 
 
 def test_untracked_delete_asks_and_real_file_survives(env):

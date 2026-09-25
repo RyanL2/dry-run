@@ -214,7 +214,9 @@ def _system_program(name: str, path_var: str) -> bool:
             continue
         real = os.path.realpath(p)
         # Every ancestor too: a user-writable ancestor could have the directory renamed and replaced.
-        bases = (os.path.realpath(d), os.path.dirname(real))
+        # Check the literal PATH entry as well as its destination. A symlink in a
+        # user-writable directory can be replaced even when it points at /usr/bin.
+        bases = (d, os.path.realpath(d), os.path.dirname(real))
         dirs = {a for b in bases for a in (b, *map(str, Path(b).parents))}
         return _root_owned(real) and all(_root_owned(x) for x in dirs)
     return False

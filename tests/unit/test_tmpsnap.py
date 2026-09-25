@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import socket
+import stat
 from pathlib import Path
 
 from dryrun.sandbox.tmpsnap import snapshot_tmp
@@ -54,3 +55,15 @@ def test_exclude_creates_empty_mountpoint_without_copying(tmp_path: Path):
     assert list((dst / "p" / "ws").iterdir()) == []
     assert (dst / "p" / "other.txt").exists()
     assert "p/ws/src/a.py" not in snap.base_fps
+
+
+def test_restrictive_directory_mode_is_preserved(tmp_path: Path):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    (src / "private").mkdir(parents=True)
+    dst.mkdir()
+    os.chmod(src / "private", 0o500)
+    try:
+        snapshot_tmp(dst, src, **LIMITS)
+        assert stat.S_IMODE(os.lstat(dst / "private").st_mode) == 0o500
+    finally:
+        os.chmod(src / "private", 0o700)

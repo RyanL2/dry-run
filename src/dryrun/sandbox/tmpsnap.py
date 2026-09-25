@@ -113,6 +113,6 @@ def snapshot_tmp(dst: Path, src: Path = Path("/tmp"), *, max_entries: int, max_t
 def _finish(dst: Path, dirs: list[tuple[str, os.stat_result]], snap: TmpSnapshot) -> TmpSnapshot:
     for rel, st in sorted(dirs, key=lambda d: d[0].count("/"), reverse=True):
         path = str(dst / rel)
-        os.chmod(path, stat.S_IMODE(st.st_mode) | 0o700)
+        os.chmod(path, stat.S_IMODE(st.st_mode))
         os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
     return snap

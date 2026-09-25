@@ -169,6 +169,13 @@ def test_fast_path_only_runs_root_owned_system_programs(tmp_path: Path):
     assert classify("echo hi", ws, P, home=home, env={"PATH": f"{ws}/.venv/bin"}).cls == "read_only"  # builtin
 
 
+def test_symlinked_path_entry_in_user_directory_is_not_native(tmp_path: Path):
+    link = tmp_path / "system-bin"
+    link.symlink_to("/usr/bin", target_is_directory=True)
+    assert classify("cat x", tmp_path, P, home=tmp_path,
+                    env={"PATH": f"{link}:/usr/bin"}).cls not in FAST
+
+
 @pytest.mark.parametrize("cmd", ["file -z a.lz", "file --uncompress a", "file -Z a", "diff -l a b",
                                  "git branch --format='%(signature)'", "git log --format='%(signature:key)'"])
 def test_more_flags_that_start_programs_are_shadowed(cmd):
