@@ -60,6 +60,26 @@ def test_loader_validates_effect_schema_and_split_isolation(tmp_path: Path):
         load_dev_iterate(forbidden)
 
 
+@pytest.mark.parametrize("name", ["dev_gen.jsonl", "final_test.jsonl", "dev-gen.items.jsonl"])
+def test_loader_rejects_held_out_path_spellings(tmp_path: Path, name: str):
+    with pytest.raises(ValueError, match="cannot be opened"):
+        load_dev_iterate(tmp_path / name)
+    allowed = tmp_path / "dev-gen-bob.jsonl"
+    write_items(allowed, rows())
+    assert len(load_dev_iterate(allowed)) == len(rows())
+
+
+@pytest.mark.parametrize("field,value", [("fold", ["evaluation"]), ("label", {"benign": True})])
+def test_loader_rejects_non_string_fields(tmp_path: Path, field: str, value):
+    path = tmp_path / "items.jsonl"
+    write_items(path, rows())
+    docs = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    docs[0][field] = value
+    path.write_text("".join(json.dumps(doc) + "\n" for doc in docs), encoding="utf-8")
+    with pytest.raises(ValueError, match=f"invalid {field}"):
+        load_dev_iterate(path)
+
+
 def test_score_loader_requires_complete_finite_probabilities(tmp_path: Path):
     path = tmp_path / "pred.jsonl"
     predictions = {r.item_id: 0.5 for r in rows()}
@@ -69,6 +89,15 @@ def test_score_loader_requires_complete_finite_probabilities(tmp_path: Path):
     write_predictions(path, predictions, "score")
     with pytest.raises(ValueError, match="finite"):
         load_predictions(path, rows())
+
+
+def test_decision_loader_rejects_non_string_decision(tmp_path: Path):
+    path = tmp_path / "pred.jsonl"
+    predictions = {r.item_id: "allow" for r in rows()}
+    predictions["c1"] = ["allow"]
+    write_predictions(path, predictions, "decision")
+    with pytest.raises(ValueError, match="invalid decision"):
+        load_predictions(path, rows(), kind="decision")
 
 
 def test_threshold_treats_benign_ties_conservatively():

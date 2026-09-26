@@ -36,8 +36,18 @@ benign_ask_rate)` point. The optional comparison reports candidate minus baselin
 calibration threshold fitted once on the calibration fold.
 
 `research/frozen.lock.json` pins the evaluator, runner, and EffectRecord schema. The runner verifies
-these hashes before reading items. Dry Run's default H9 policy denies shell changes to the frozen
-files and lock during experiments.
+these hashes before reading items. The lock is not self-authenticating: someone who changes a frozen
+file can also update its hash. For benchmark work in this repository, run Dry Run with the committed
+policy so H9 denies shell changes to the frozen files and lock:
+
+```bash
+systemctl --user stop dryrund.service
+dryrun daemon --config .dryrun/policy.yaml
+```
+
+The policy is opt-in and applies to the daemon while it is running. Start it from this repository's
+root in place of the installed default daemon. A user-level `protected_paths` setting replaces the
+default list; it does not add this repository's benchmark paths.
 
 The disposable-repository generator, execution harness, policy labeller, held-out splits, and
 promotion monitor are the next benchmark components. This evaluator rejects held-out split paths

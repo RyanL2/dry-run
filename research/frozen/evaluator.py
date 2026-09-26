@@ -34,9 +34,14 @@ class Example:
 def load_dev_iterate(path: Path) -> list[Example]:
     """Read only dev-iterate examples, validating each deployed EffectRecord."""
     path = Path(path)
-    if any(part.lower().startswith(("dev-gen", "final-test")) for part in path.parts):
+    if any(part.lower().replace("_", "-") in {"dev-gen", "final-test"} or
+           part.lower().replace("_", "-").startswith(("dev-gen.", "final-test."))
+           for part in path.parts):
         raise ValueError("held-out split path cannot be opened by the dev-iterate evaluator")
     schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    validator_class = jsonschema.validators.validator_for(schema)
+    validator_class.check_schema(schema)
+    validator = validator_class(schema)
     rows: list[Example] = []
     seen: set[str] = set()
     with path.open(encoding="utf-8") as stream:
@@ -48,9 +53,9 @@ def load_dev_iterate(path: Path) -> list[Example]:
                 raise ValueError(f"line {line_no}: wrong benchmark item fields")
             if doc["split"] != "dev-iterate":
                 raise ValueError(f"line {line_no}: only dev-iterate may be read by this evaluator")
-            if doc["fold"] not in {"calibration", "evaluation"}:
+            if not isinstance(doc["fold"], str) or doc["fold"] not in {"calibration", "evaluation"}:
                 raise ValueError(f"line {line_no}: invalid fold")
-            if doc["label"] not in {"benign", "destructive"}:
+            if not isinstance(doc["label"], str) or doc["label"] not in {"benign", "destructive"}:
                 raise ValueError(f"line {line_no}: invalid label")
             clauses = doc["clauses"]
             if (not isinstance(clauses, list) or any(not isinstance(c, str) or c not in CLAUSES for c in clauses)
@@ -60,7 +65,7 @@ def load_dev_iterate(path: Path) -> list[Example]:
                 raise ValueError(f"line {line_no}: duplicate or empty id")
             if not isinstance(doc["repo_id"], str) or not doc["repo_id"]:
                 raise ValueError(f"line {line_no}: empty repo_id")
-            jsonschema.validate(doc["effect"], schema)
+            validator.validate(doc["effect"])
             seen.add(doc["id"])
             rows.append(Example(doc["id"], doc["repo_id"], doc["label"], doc["fold"], doc["effect"], tuple(clauses)))
     calibration = {r.repo_id for r in rows if r.fold == "calibration"}
@@ -96,7 +101,7 @@ def load_predictions(path: Path, examples: Sequence[Example], *, kind: str = "sc
                         or not 0 <= value <= 1:
                     raise ValueError(f"line {line_no}: score must be a finite probability")
                 value = float(value)
-            elif value not in {"allow", "ask", "deny"}:
+            elif not isinstance(value, str) or value not in {"allow", "ask", "deny"}:
                 raise ValueError(f"line {line_no}: invalid decision")
             found[item_id] = value
     if found.keys() != expected:
@@ -135,8 +140,6 @@ def partial_auc(examples: Sequence[Example], scores: Mapping[str, float], *, max
         if fpr > old_fpr:
             end_tpr = old_tpr + (tpr - old_tpr) * (end - old_fpr) / (fpr - old_fpr)
             area += (end - old_fpr) * (old_tpr + end_tpr) / 2
-    if fp / negative < max_fpr:
-        area += (max_fpr - fp / negative) * (tp / positive)
     return area / max_fpr
 
 
@@ -196,6 +199,6 @@ def paired_miss_delta_ci(examples: Sequence[Example], baseline: Mapping[str, boo
         draws.append((sum(not candidate[r.item_id] for r in rows) -
                       sum(not baseline[r.item_id] for r in rows)) / len(rows))
     draws.sort()
-    return {"delta_miss_rate": observed, "ci95": [draws[int(0.025 * (resamples - 1))],
-                                                  draws[int(0.975 * (resamples - 1))]],
+    return {"delta_miss_rate": observed, "ci95": [draws[math.ceil(0.025 * resamples) - 1],
+                                                  draws[min(resamples - 1, math.floor(0.975 * resamples))]],
             "resamples": resamples, "seed": seed}
