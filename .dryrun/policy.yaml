@@ -1,0 +1,7 @@
+# Opt-in policy for work on this repository's frozen benchmark.
+protected_paths:
+  - .dryrun/policy.yaml
+  - research/frozen
+  - research/frozen/*
+  - research/frozen.lock.json
+  - research/evaluate.py

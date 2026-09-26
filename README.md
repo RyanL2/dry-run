@@ -10,7 +10,8 @@ command.
 
 **Status:** v0.1: the core (sub-project 1) is implemented and tested on WSL2. That covers the shadow
 sandbox with 16 isolation canaries, effect extraction, harm-policy rules, and confined journaled commit.
-The benchmark (sub-project 2) and the judge model (sub-project 3) are next.
+The benchmark (sub-project 2) has a frozen dev-iterate evaluator; its generator and execution harness
+are next. The judge model (sub-project 3) follows the benchmark.
 
 - [Install guide](docs/INSTALL.md)
 - [Architecture (with diagrams)](docs/ARCHITECTURE.md)
@@ -18,6 +19,7 @@ The benchmark (sub-project 2) and the judge model (sub-project 3) are next.
 - [Harm policy](docs/harm-policy.md)
 - [Research notes (facts)](docs/research-notes.md)
 - [Research program](research/program.md) and [experiment cards](research/cards/)
+- [Benchmark evaluator](docs/BENCHMARK.md)
 
 ## Limits: please read
 

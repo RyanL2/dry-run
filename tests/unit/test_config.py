@@ -23,6 +23,15 @@ def test_default_values_match_spec():
     assert cfg.policy.h1_mass_threshold == 20
     assert ".ssh" in cfg.policy.secret_paths
     assert "node_modules" in cfg.policy.build_output_dirs
+    assert cfg.policy.protected_paths == ()
+
+
+def test_repository_benchmark_policy_is_opt_in():
+    policy = Path(__file__).resolve().parents[2] / ".dryrun" / "policy.yaml"
+    cfg = load_config(policy)
+    assert cfg.policy.protected_paths == (
+        ".dryrun/policy.yaml", "research/frozen", "research/frozen/*", "research/frozen.lock.json",
+        "research/evaluate.py")
 
 
 def test_user_file_overrides_nested_keys(tmp_path: Path):

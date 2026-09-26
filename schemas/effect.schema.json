@@ -20,7 +20,7 @@
     "triage": {
       "type": "object", "additionalProperties": false, "required": ["class", "reason"],
       "properties": {
-        "class": {"enum": ["read_only", "apply", "non_shadowable", "long_running", "shadow"]},
+        "class": {"enum": ["read_only", "git_read", "apply", "non_shadowable", "long_running", "shadow"]},
         "reason": {"type": "string"}
       }
     },
