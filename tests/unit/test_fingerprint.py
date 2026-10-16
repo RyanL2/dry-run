@@ -47,3 +47,32 @@ def test_submounts_parses_mountinfo():
     )
     assert submounts(Path("/home/u/ws"), info) == ["/home/u/ws/data", "/home/u/ws/with space"]
     assert submounts(Path("/home/u/other"), info) == []
+
+
+# C-0009: lower_changed and the commit conflict check both compare these fingerprints, so every way a
+# concurrent writer can change a file must change its fingerprint.
+
+def _rewrite_keeping_mtime(path: Path, data: bytes) -> None:
+    st = os.lstat(path)
+    with open(path, "r+b") as f:
+        f.write(data)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+
+def test_same_size_in_place_edit_with_restored_mtime_is_seen(tmp_path: Path):
+    make_tree(tmp_path)
+    before = fingerprint_tree(tmp_path)
+    _rewrite_keeping_mtime(tmp_path / "a" / "f.txt", b"z")
+    after = fingerprint_tree(tmp_path)
+    assert after["a/f.txt"][2] == before["a/f.txt"][2]  # mtime forged back
+    assert after != before
+
+
+def test_rename_over_with_same_size_and_mtime_is_seen(tmp_path: Path):
+    make_tree(tmp_path)
+    before = fingerprint_tree(tmp_path)
+    st = os.lstat(tmp_path / "g.txt")
+    (tmp_path / "new").write_text("z")
+    os.utime(tmp_path / "new", ns=(st.st_atime_ns, st.st_mtime_ns))
+    os.replace(tmp_path / "new", tmp_path / "g.txt")
+    assert fingerprint_tree(tmp_path) != before
