@@ -193,23 +193,36 @@ class Pipeline:
     def _shadow(self, run: RunPaths, req: dict, tri, ws_root: Path, cwd: Path, session_id: str, command: str,
                 cancel: threading.Event | None, timings: dict) -> tuple[Decision, dict]:
         cfg, policy = self.cfg, self.cfg.policy
-        t = time.monotonic()
+        last, totals = time.monotonic(), {}
+
+        def lap(name: str) -> None:
+            """ms since the previous lap; `stage.sub` laps also add up to the stage key (prepare, judge)."""
+            nonlocal last
+            now = time.monotonic()
+            stage = name.partition(".")[0]
+            totals[stage] = totals.get(stage, 0.0) + now - last
+            timings[name], timings[stage] = int((now - last) * 1000), int(totals[stage] * 1000)
+            last = now
+
         prep = prepare(run, ws_root=ws_root, cwd=cwd, command=command, env=dict(req.get("env") or {}), cfg=cfg,
-                       home=self.home, state=self.store.root, bwrap=self.bwrap)
+                       home=self.home, state=self.store.root, bwrap=self.bwrap, lap=lap)
+        lap("prepare.sandbox")
         snap = gitstate.snapshot(ws_root)
-        timings["prepare"] = int((time.monotonic() - t) * 1000)
-        t = time.monotonic()
+        lap("prepare.git_snapshot")
         res = run_shadow(prep.spec, run_id=run.run_id, out_dir=run.root, cfg=cfg.shadow, watch_fs=run.root,
                          cancel=cancel)
-        timings["run"] = int((time.monotonic() - t) * 1000)
-        t = time.monotonic()
+        lap("run")
         lower_changed = digest(fingerprint_tree(ws_root)) != digest(prep.ws_base)
+        lap("judge.fp_post")
         ws_eff = extract("workspace", ws_root, run.ws_up, prep.ws_base)
         tmp_eff = extract("tmp", run.tmp_lower, run.tmp_up, prep.tmp.base_fps, skip=prep.tmp_skip,
                           seq_start=len(ws_eff.ops))
+        lap("judge.extract")
         annotate(ws_eff.entries, snap, policy, self.store.ledger(session_id, str(ws_root)), ws_eff.contents,
                  blob_exists=lambda shas: gitstate.objects_exist(ws_root, shas))
+        lap("judge.annotate")
         git = git_effects(ws_root, run, ws_eff.entries) if snap.is_repo else {}
+        lap("judge.git_effects")
         trace = parse_trace_file(res.trace_path)
         stdout = _read_capped(res.stdout_path, cfg.shadow.output_max)
         stderr = _read_capped(res.stderr_path, cfg.shadow.output_max)
@@ -222,6 +235,7 @@ class Pipeline:
                 budget -= len(data)
                 blobs[f"{area}/{rel}"] = data
         decoy_hits = scan(prep.token, blobs)
+        lap("judge.scan")
         flags = compute_flags(res=res, trace=trace, ws_eff=ws_eff, tmp_eff=tmp_eff, lower_changed=lower_changed,
                               tmp_partial=prep.tmp.partial, output=stdout + stderr,
                               fsize_max=cfg.shadow.file_size_max)
@@ -240,7 +254,7 @@ class Pipeline:
         hits = evaluate(record, policy,
                         read=lambda rel: _read_capped(contents[rel], 1 << 20) if rel in contents else None)
         decision = decide("shadow", rec=record, hits=hits, judge=self.judge)
-        timings["judge"] = int((time.monotonic() - t) * 1000)
+        lap("judge.decide")
         record_json = record.to_json()
         decision.run_id = run.run_id
         if decision.mode == "commit" and decision.decision in ("allow", "ask"):

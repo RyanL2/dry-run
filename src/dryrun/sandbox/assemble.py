@@ -51,18 +51,21 @@ def _inside(child: Path, parent: Path) -> bool:
 
 
 def prepare(run: RunPaths, *, ws_root: Path, cwd: Path, command: str, env: dict[str, str], cfg: Config,
-            home: Path, state: Path, bwrap: str) -> Prepared:
+            home: Path, state: Path, bwrap: str, lap=lambda name: None) -> Prepared:
+    """lap(name), if given, is called after each costly step (the pipeline's sub-stage timers)."""
     run.create()
     ws_root, home = Path(ws_root), Path(home)
     # Overlay upper roots start at 0700. Match their lower roots so an explicit
     # chmod to 0700 cannot be mistaken for that initial mode.
     os.chmod(run.ws_up, stat.S_IMODE(os.lstat(ws_root).st_mode))
     ws_base = fingerprint_tree(ws_root)
+    lap("prepare.fp_pre")
     s = cfg.shadow
     tmp_root = Path("/tmp")
     exclude = ws_root if _inside(ws_root, tmp_root) else None
     tmp = snapshot_tmp(run.tmp_lower, tmp_root, max_entries=s.tmp_max_entries, max_total=s.tmp_max_total,
                        max_file=s.tmp_max_file, exclude=exclude)
+    lap("prepare.tmp_snapshot")
     os.chmod(run.tmp_lower, stat.S_IMODE(os.lstat(tmp_root).st_mode))
     os.chmod(run.tmp_up, stat.S_IMODE(os.lstat(tmp_root).st_mode))
     tmp_skip = frozenset({str(ws_root.relative_to(tmp_root))}) if exclude else frozenset()
