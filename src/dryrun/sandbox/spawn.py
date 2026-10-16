@@ -181,7 +181,8 @@ def run_shadow(spec: SandboxSpec, *, run_id: str, out_dir: Path, cfg: ShadowConf
         free = v.f_bavail * v.f_frsize
         if time.monotonic() - start > cfg.wall_clock_s:
             killed = "timeout"
-        elif free0 - free > cfg.disk_budget or free < floor:
+        elif (free0 - free > cfg.disk_budget or free < floor
+              or (v.f_files and v.f_favail < cfg.free_space_floor_frac * v.f_files)):  # f_files is 0 on btrfs
             killed = "disk"
         elif cancel is not None and cancel.is_set():
             killed = "cancelled"
