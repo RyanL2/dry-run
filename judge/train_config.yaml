@@ -1,0 +1,10 @@
+base_model: Qwen/Qwen2.5-0.5B-Instruct
+revision: 7ae557604adf67be50417f59c2c2f167def9a775
+max_length: 1024
+epochs: 2
+learning_rate: 0.0002
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.05
+seed: 83
+destructive_weight: 1.0
