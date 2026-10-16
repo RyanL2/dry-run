@@ -104,6 +104,10 @@ class Store:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
+    def commit_lock(self):
+        """Held by apply_run for a whole commit and by recover_all, so recovery never replays a live journal."""
+        return self._locked(self.journal_dir / ".lock")
+
     def authorize(self, run: RunPaths, *, session_id: str, decision: str) -> str:
         token = secrets.token_urlsafe(24)
         self.save_meta(run, token_sha256=_sha(token), session_id=session_id, decision=decision,

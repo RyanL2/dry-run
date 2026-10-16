@@ -4,6 +4,7 @@ import io
 import json
 import os
 import shutil
+import threading
 from pathlib import Path
 
 import pytest
@@ -254,6 +255,51 @@ def test_apply_run_replays_output_and_is_single_use(tmp_path: Path):
     assert "new/deep/n.txt" in store.ledger("s1", str(ws))
     assert apply_run(store, run.run_id, token, cfg=cfg, out=io.BytesIO(), err=io.BytesIO()) == 3
     unlock(ws / "new" / "deep", up / "new" / "deep")
+
+
+def test_recover_waits_for_an_apply_in_progress(tmp_path: Path):
+    store = Store(tmp_path / "state")
+    with store.commit_lock():                                         # held by apply_run for its whole duration
+        t = threading.Thread(target=recover_all, args=(store,))
+        t.start()
+        t.join(0.3)
+        assert t.is_alive()                                           # blocked, not replaying
+    t.join(5)
+    assert not t.is_alive()
+
+
+def test_apply_run_holds_the_commit_lock(tmp_path: Path, monkeypatch):
+    import dryrun.commit as commit_mod
+    store = Store(tmp_path / "state")
+    run = store.new_run()
+    ws, up, cs = build(tmp_path)
+    run.changeset.write_text(json.dumps(cs.to_json()))
+    token = store.authorize(run, session_id="s1", decision="allow")
+    real = commit_mod.apply_changeset
+    threads, blocked = [], []
+
+    def probe(cs, *, journal_path):
+        t = threading.Thread(target=recover_all, args=(store,))
+        t.start()
+        t.join(0.3)
+        threads.append(t)
+        blocked.append(t.is_alive())
+        return real(cs, journal_path=journal_path)
+
+    monkeypatch.setattr(commit_mod, "apply_changeset", probe)
+    assert apply_run(store, run.run_id, token, cfg=load_config(use_user_file=False), out=io.BytesIO(),
+                     err=io.BytesIO()) == 0
+    threads[0].join(5)
+    assert blocked == [True] and not threads[0].is_alive()
+    unlock(ws / "new" / "deep", up / "new" / "deep")
+
+
+def test_done_markers_are_fsynced(tmp_path: Path, monkeypatch):
+    import dryrun.commit as commit_mod
+    synced = []
+    monkeypatch.setattr(commit_mod.os, "fsync", lambda fd: synced.append(fd))
+    commit_mod._marker_writer(tmp_path / "j.json")(7)
+    assert (tmp_path / "j.done").read_text() == "7\n" and synced
 
 
 def _dir_replacement(tmp_path: Path):
