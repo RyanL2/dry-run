@@ -1,7 +1,9 @@
-"""C-0003 (and N2): for short commands, do fixed pipeline stages dominate the added latency?"""
+"""C-0003 (and N2): for short commands, do fixed pipeline stages dominate the added latency?
+C-0009..C-0011: which sub-stages (fingerprint walk, git snapshot, /tmp copy) make up that fixed cost?"""
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -73,8 +75,12 @@ def main() -> None:
         "median_judge_ms": median([r.get("judge_ms", 0) for r in shadowed]),
         "median_native_ms": median([r["native_ms"] for r in shadowed]),
     }
+    # C-0009..C-0011: the sub-stage laps that add up to prepare_ms and judge_ms.
+    subs = sorted({k for r in shadowed for k in r if "." in k})
+    summary.update({f"median_{k}": median([r.get(k, 0) for r in shadowed]) for k in subs})
     print(json.dumps(summary, indent=2))
-    ledger_append("C-0003", "stages", {"summary": summary, "rows": rows}, "finished", "20k-file git repo")
+    ledger_append("C-0003", "stages", {"summary": summary, "rows": rows}, "finished",
+                  f"20k-file git repo; {sum(len(f) for _, _, f in os.walk('/tmp'))} files under /tmp")
     shutil.rmtree(base, ignore_errors=True)
 
 

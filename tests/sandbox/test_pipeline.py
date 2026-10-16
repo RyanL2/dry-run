@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import stat
 import subprocess
@@ -51,6 +52,11 @@ def test_allow_commit_round_trip(env):
     p, ws, home = env
     d = ask(p, ws, home, "echo generated > out.txt && echo done")
     assert (d.decision, d.mode) == ("allow", "commit") and d.token, d.reason
+    timings = json.loads(p.store.log_path.read_text().splitlines()[-1])["timings_ms"]
+    assert set(timings) == {"triage", "prepare", "prepare.fp_pre", "prepare.tmp_snapshot", "prepare.sandbox",
+                            "prepare.git_snapshot", "run", "judge",
+                            "judge.fp_post", "judge.extract", "judge.annotate", "judge.git_effects",
+                            "judge.scan", "judge.decide"}
     assert not (ws / "out.txt").exists()
     code, out, _ = apply(p, d)
     assert code == 0 and out == b"done\n"

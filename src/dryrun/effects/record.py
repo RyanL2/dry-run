@@ -91,11 +91,14 @@ def git_effects(ws_root: Path, run: RunPaths, ws_entries: list[FsEntry]) -> dict
 
 
 def compute_flags(*, res: SpawnResult | None, trace: TraceSummary, ws_eff: AreaEffect, tmp_eff: AreaEffect,
-                  lower_changed: bool, tmp_partial: bool, output: bytes) -> list[str]:
+                  lower_changed: bool, tmp_partial: bool, output: bytes, fsize_max: int | None = None) -> list[str]:
     flags = []
     if res is not None and res.timed_out:
         flags.append("timeout")
-    if (res is not None and res.killed_reason in ("disk", "killed")) or trace.truncated:
+    # A writer killed by SIGXFSZ is invisible when it is not the last command, so also check the effect itself.
+    at_fsize = fsize_max is not None and any((e.bytes_after or 0) >= fsize_max
+                                             for e in ws_eff.entries + tmp_eff.entries)
+    if (res is not None and res.killed_reason in ("disk", "killed", "fsize")) or trace.truncated or at_fsize:
         flags.append("resource_limit")
     if trace.net:
         flags.append("incomplete_network")

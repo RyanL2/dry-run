@@ -222,7 +222,12 @@ def _write_journal(path: Path, cs: ChangeSet) -> None:
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
-    dfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    _fsync_dir(path.parent)
+
+
+def _fsync_dir(path: Path) -> None:
+    """A new or renamed file's directory entry only survives a crash once its directory is fsynced."""
+    dfd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(dfd)
     finally:
@@ -237,8 +242,13 @@ def _marker_writer(journal_path: Path) -> Callable[[int], None]:
     path = _marker(journal_path)
 
     def done(seq: int) -> None:
+        new = not path.exists()
         with open(path, "a") as f:
             f.write(f"{seq}\n")
+            f.flush()
+            os.fsync(f.fileno())
+        if new:
+            _fsync_dir(path.parent)
 
     return done
 
@@ -305,25 +315,26 @@ def apply_run(store: Store, run_id: str, token: str, *, cfg: Config, out: Binary
         err.write(f"dryrun: refused: {e}\n".encode())
         return EXIT_REFUSED
     meta = store.load_meta(run)
-    try:
-        cs = ChangeSet.from_json(json.loads(run.changeset.read_text()))
-        report = apply_changeset(cs, journal_path=store.journal_dir / f"{run_id}.json")
-    except CommitError as e:
-        store.finish(run, "conflict" if e.code == EXIT_CONFLICT and not e.partial else "failed")
-        err.write(f"dryrun: {e}\n".encode())
-        if e.code == EXIT_CONFLICT and not e.partial:
-            err.write(b"dryrun: nothing was written; re-run the command to shadow it again\n")
-        return e.code
-    except Exception as e:
-        store.finish(run, "failed")
-        err.write(f"dryrun: commit failed ({type(e).__name__}: {e}); state may be partial, run `dryrun recover`\n"
-                  .encode())
-        return EXIT_FIDELITY
-    if "workspace" in cs.roots:
-        store.ledger_add(str(meta.get("session_id", "")), cs.roots["workspace"], report.created)
-    _replay(run.stdout, out)
-    _replay(run.stderr, err)
-    store.finish(run, "committed")
+    with store.commit_lock():
+        try:
+            cs = ChangeSet.from_json(json.loads(run.changeset.read_text()))
+            report = apply_changeset(cs, journal_path=store.journal_dir / f"{run_id}.json")
+        except CommitError as e:
+            store.finish(run, "conflict" if e.code == EXIT_CONFLICT and not e.partial else "failed")
+            err.write(f"dryrun: {e}\n".encode())
+            if e.code == EXIT_CONFLICT and not e.partial:
+                err.write(b"dryrun: nothing was written; re-run the command to shadow it again\n")
+            return e.code
+        except Exception as e:
+            store.finish(run, "failed")
+            err.write(f"dryrun: commit failed ({type(e).__name__}: {e}); state may be partial, run `dryrun recover`\n"
+                      .encode())
+            return EXIT_FIDELITY
+        if "workspace" in cs.roots:
+            store.ledger_add(str(meta.get("session_id", "")), cs.roots["workspace"], report.created)
+        _replay(run.stdout, out)
+        _replay(run.stderr, err)
+        store.finish(run, "committed")
     store.remove_run(run)
     code = meta.get("exit_code")
     return int(code) if isinstance(code, int) else 0
@@ -448,6 +459,11 @@ def _recover_one(store: Store, journal: Path) -> str | None:
 
 def recover_all(store: Store) -> list[str]:
     """Finish interrupted commits where that is provably safe; retire every journal after one attempt."""
+    with store.commit_lock():
+        return _recover_journals(store)
+
+
+def _recover_journals(store: Store) -> list[str]:
     done = []
     for journal in sorted(store.journal_dir.glob("*.json")):
         run_id = journal.stem

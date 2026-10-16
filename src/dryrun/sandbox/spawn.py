@@ -181,7 +181,8 @@ def run_shadow(spec: SandboxSpec, *, run_id: str, out_dir: Path, cfg: ShadowConf
         free = v.f_bavail * v.f_frsize
         if time.monotonic() - start > cfg.wall_clock_s:
             killed = "timeout"
-        elif free0 - free > cfg.disk_budget or free < floor:
+        elif (free0 - free > cfg.disk_budget or free < floor
+              or (v.f_files and v.f_favail < cfg.free_space_floor_frac * v.f_files)):  # f_files is 0 on btrfs
             killed = "disk"
         elif cancel is not None and cancel.is_set():
             killed = "cancelled"
@@ -195,8 +196,11 @@ def run_shadow(spec: SandboxSpec, *, run_id: str, out_dir: Path, cfg: ShadowConf
     if killed is None and not _started(trace_p):
         detail = stderr_p.read_text(errors="replace").strip().splitlines()
         raise SandboxError(detail[0] if detail else f"sandbox did not start (exit {code})")
-    return SpawnResult(exit_code=None if killed else code, wall_ms=wall_ms, timed_out=killed == "timeout",
-                       killed_reason=killed, stdout_path=stdout_p, stderr_path=stderr_p, trace_path=trace_p)
+    if killed is None and code in (-signal.SIGXFSZ, 128 + signal.SIGXFSZ):
+        killed = "fsize"  # the command exited on its own, so its exit code is kept
+    return SpawnResult(exit_code=code if killed in (None, "fsize") else None, wall_ms=wall_ms,
+                       timed_out=killed == "timeout", killed_reason=killed, stdout_path=stdout_p,
+                       stderr_path=stderr_p, trace_path=trace_p)
 
 
 READONLY_MEMORY_MAX = 1024**3
