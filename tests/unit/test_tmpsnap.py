@@ -67,3 +67,15 @@ def test_restrictive_directory_mode_is_preserved(tmp_path: Path):
         assert stat.S_IMODE(os.lstat(dst / "private").st_mode) == 0o500
     finally:
         os.chmod(src / "private", 0o700)
+
+
+def test_racy_base_fingerprints_without_multigrain_ctime(tmp_path: Path, monkeypatch):
+    # The commit checks tmp targets against these fingerprints; see test_fingerprint racy test.
+    from dryrun import fingerprint
+    monkeypatch.setattr(fingerprint, "multigrain_ctime", lambda root: False)
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.mkdir()
+    dst.mkdir()
+    (src / "f").write_text("x")
+    snap = snapshot_tmp(dst, src, **LIMITS)
+    assert snap.base_fps["f"][3] < 0

@@ -12,7 +12,7 @@ import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from dryrun.fingerprint import Fp, fp_of
+from dryrun.fingerprint import Fp, observe, racy_cutoff
 
 
 @dataclass
@@ -54,6 +54,7 @@ def snapshot_tmp(dst: Path, src: Path = Path("/tmp"), *, max_entries: int, max_t
     src, dst = Path(src), Path(dst)
     snap = TmpSnapshot()
     src_dev = os.lstat(src).st_dev
+    cutoff = racy_cutoff(src)
     excl_rel = None
     if exclude is not None:
         try:
@@ -89,7 +90,7 @@ def snapshot_tmp(dst: Path, src: Path = Path("/tmp"), *, max_entries: int, max_t
             if stat.S_ISDIR(st.st_mode):
                 os.makedirs(target, mode=0o700, exist_ok=True)
                 if st.st_uid == uid:
-                    snap.base_fps[child] = fp_of(st)
+                    snap.base_fps[child] = observe(st, cutoff)
                     dirs.append((child, st))
                 snap.entries += 1
                 stack.append(child)
@@ -98,13 +99,13 @@ def snapshot_tmp(dst: Path, src: Path = Path("/tmp"), *, max_entries: int, max_t
                     snap.partial = True
                     continue
                 if _copy_file(str(src / child), target, st):
-                    snap.base_fps[child] = fp_of(st)
+                    snap.base_fps[child] = observe(st, cutoff)
                     snap.entries += 1
                     snap.bytes += st.st_size
             elif stat.S_ISLNK(st.st_mode):
                 os.symlink(os.readlink(src / child), target)
                 os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns), follow_symlinks=False)
-                snap.base_fps[child] = fp_of(st)
+                snap.base_fps[child] = observe(st, cutoff)
                 snap.entries += 1
             # sockets, fifos, devices: never copied
     return _finish(dst, dirs, snap)

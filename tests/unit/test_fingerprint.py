@@ -4,6 +4,7 @@ import os
 import time
 from pathlib import Path
 
+from dryrun import fingerprint
 from dryrun.fingerprint import digest, fingerprint_tree, fp_of, submounts, subtree
 
 
@@ -76,3 +77,30 @@ def test_rename_over_with_same_size_and_mtime_is_seen(tmp_path: Path):
     os.utime(tmp_path / "new", ns=(st.st_atime_ns, st.st_mtime_ns))
     os.replace(tmp_path / "new", tmp_path / "g.txt")
     assert fingerprint_tree(tmp_path) != before
+
+
+def test_racy_entries_never_compare_equal_without_multigrain_ctime(tmp_path: Path, monkeypatch):
+    # Coarse timestamps: a change in the same clock tick as our stat can leave (ino, size, mtime, ctime)
+    # equal. Without multigrain ctime, entries changed that recently must count as changed.
+    monkeypatch.setattr(fingerprint, "multigrain_ctime", lambda root: False)
+    make_tree(tmp_path)
+    first, second = fingerprint_tree(tmp_path), fingerprint_tree(tmp_path)
+    assert first["g.txt"][3] < 0 and first != second
+    monkeypatch.setattr(fingerprint, "RACY_NS", 1_000_000)
+    time.sleep(0.01)
+    assert fingerprint_tree(tmp_path) == fingerprint_tree(tmp_path)  # old enough: real ctimes again
+
+
+def test_multigrain_ctime_needs_linux_6_13_and_a_local_fs():
+    info = ("22 1 8:1 / / rw - ext4 /dev/sda1 rw\n"
+            "40 22 0:5 / /tmp rw - tmpfs tmpfs rw\n"
+            "41 22 0:6 / /mnt/c rw - 9p drvfs rw\n")
+    assert fingerprint.fstype(Path("/home/u/ws"), info) == "ext4"
+    assert fingerprint.fstype(Path("/tmp"), info) == "tmpfs"
+    assert fingerprint.fstype(Path("/tmpx"), info) == "ext4"
+    assert fingerprint.fstype(Path("/mnt/c/Users"), info) == "9p"
+    assert fingerprint.multigrain_ctime(Path("/home/u/ws"), "6.18.33.1-microsoft-standard-WSL2", info)
+    assert fingerprint.multigrain_ctime(Path("/tmp"), "6.13.0-rc1", info)
+    assert not fingerprint.multigrain_ctime(Path("/home/u/ws"), "6.12.9", info)
+    assert not fingerprint.multigrain_ctime(Path("/home/u/ws"), "5.15.167.4-microsoft-standard-WSL2", info)
+    assert not fingerprint.multigrain_ctime(Path("/mnt/c/Users"), "6.18.0", info)
