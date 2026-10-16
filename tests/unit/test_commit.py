@@ -4,6 +4,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import threading
 from pathlib import Path
 
@@ -297,9 +298,12 @@ def test_apply_run_holds_the_commit_lock(tmp_path: Path, monkeypatch):
 def test_done_markers_are_fsynced(tmp_path: Path, monkeypatch):
     import dryrun.commit as commit_mod
     synced = []
-    monkeypatch.setattr(commit_mod.os, "fsync", lambda fd: synced.append(fd))
-    commit_mod._marker_writer(tmp_path / "j.json")(7)
-    assert (tmp_path / "j.done").read_text() == "7\n" and synced
+    monkeypatch.setattr(commit_mod.os, "fsync", lambda fd: synced.append(stat.S_ISDIR(os.fstat(fd).st_mode)))
+    mark = commit_mod._marker_writer(tmp_path / "j.json")
+    mark(7)
+    mark(8)
+    assert (tmp_path / "j.done").read_text() == "7\n8\n"
+    assert synced == [False, True, False]                             # the new file's dirent is synced once
 
 
 def _dir_replacement(tmp_path: Path):

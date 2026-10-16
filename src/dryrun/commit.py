@@ -222,7 +222,12 @@ def _write_journal(path: Path, cs: ChangeSet) -> None:
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
-    dfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    _fsync_dir(path.parent)
+
+
+def _fsync_dir(path: Path) -> None:
+    """A new or renamed file's directory entry only survives a crash once its directory is fsynced."""
+    dfd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(dfd)
     finally:
@@ -237,10 +242,13 @@ def _marker_writer(journal_path: Path) -> Callable[[int], None]:
     path = _marker(journal_path)
 
     def done(seq: int) -> None:
+        new = not path.exists()
         with open(path, "a") as f:
             f.write(f"{seq}\n")
             f.flush()
             os.fsync(f.fileno())
+        if new:
+            _fsync_dir(path.parent)
 
     return done
 
