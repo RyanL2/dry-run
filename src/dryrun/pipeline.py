@@ -146,7 +146,7 @@ class Pipeline:
                             ["S.canary"]), None
         run = self.store.new_run()
         try:
-            with ThreadPoolExecutor(2, thread_name_prefix="dryrun-shadow") as pool:
+            with ThreadPoolExecutor(1, thread_name_prefix="dryrun-git") as pool:
                 return self._shadow(pool, run, req, tri, ws_root, cwd, session_id, command, cancel, timings)
         except SandboxError as exc:
             self.store.finish(run, "failed")
@@ -225,7 +225,6 @@ class Pipeline:
         # It must start after the base walk and end before the post walk: then every entry it reads was
         # stat'ed before and after, and any concurrent change to it sets lower_changed.
         git_snap = pool.submit(_timed, gitstate.snapshot, ws_root)
-        base_digest = pool.submit(digest, prep.ws_base)  # only recorded in the ChangeSet
         res = run_shadow(prep.spec, run_id=run.run_id, out_dir=run.root, cfg=cfg.shadow, watch_fs=run.root,
                          cancel=cancel)
         lap("run")
@@ -269,7 +268,7 @@ class Pipeline:
             cache_files=files, cache_bytes=size, git_is_repo=snap.is_repo, git=git, trace=trace,
             decoy_hits=decoy_hits, flags=flags)
         cs = ChangeSet(run_id=run.run_id, roots={"workspace": str(ws_root), "tmp": "/tmp"},
-                       base_digest=base_digest.result(), ops=ws_eff.ops + tmp_eff.ops,
+                       base_digest=digest(prep.ws_base), ops=ws_eff.ops + tmp_eff.ops,
                        refused=ws_eff.refused + tmp_eff.refused)
         contents = ws_eff.contents
         hits = evaluate(record, policy,
