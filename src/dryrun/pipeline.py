@@ -223,7 +223,8 @@ class Pipeline:
                 blobs[f"{area}/{rel}"] = data
         decoy_hits = scan(prep.token, blobs)
         flags = compute_flags(res=res, trace=trace, ws_eff=ws_eff, tmp_eff=tmp_eff, lower_changed=lower_changed,
-                              tmp_partial=prep.tmp.partial, output=stdout + stderr)
+                              tmp_partial=prep.tmp.partial, output=stdout + stderr,
+                              fsize_max=cfg.shadow.file_size_max)
         files, size = cache_counts(prep.caches)
         request = self.store.get_request(session_id)
         record = build_record(

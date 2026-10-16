@@ -61,6 +61,12 @@ def test_cancel_event_stops_run(ws, run_dir, shadow_cfg):
     assert res.killed_reason == "cancelled"
 
 
+def test_file_size_limit_kill_is_classified(ws, run_dir, shadow_cfg):
+    cfg = replace(shadow_cfg, file_size_max=1 << 20)
+    res = shadow(ws, run_dir, cfg, "head -c 4M /dev/zero > big")
+    assert res.killed_reason == "fsize"
+
+
 def test_setup_failure_raises_sandbox_error(ws, run_dir, shadow_cfg):
     spec = simple_spec(ws, run_dir, "true")
     bad = replace(spec, overlays=(OverlaySpec("/nonexistent-lower", spec.overlays[0].upper,
