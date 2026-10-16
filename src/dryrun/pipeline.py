@@ -26,6 +26,7 @@ from dryrun.runpaths import RunPaths
 from dryrun.sandbox.assemble import filter_env, prepare
 from dryrun.sandbox.decoys import scan
 from dryrun.sandbox.spawn import SandboxError, run_readonly_command, run_shadow
+from dryrun.sandbox.tmpsnap import TmpLowerCache
 from dryrun.sandbox.trace import parse_trace_file
 from dryrun.store import Store, TokenError
 from dryrun.triage import classify
@@ -63,6 +64,7 @@ class Pipeline:
         self.gate = gate or Gate()
         self.home = Path(home) if home is not None else Path.home()
         self.bwrap = bwrap or str(bwrap_path())
+        self.tmp_cache = TmpLowerCache(store.root / "tmp-lowers")
 
     # --- public ----------------------------------------------------------------------------------
     def handle_prompt(self, session_id: str, text: str) -> None:
@@ -217,7 +219,7 @@ class Pipeline:
             last = now
 
         prep = prepare(run, ws_root=ws_root, cwd=cwd, command=command, env=dict(req.get("env") or {}), cfg=cfg,
-                       home=self.home, state=self.store.root, bwrap=self.bwrap, lap=lap)
+                       home=self.home, state=self.store.root, bwrap=self.bwrap, lap=lap, tmp_cache=self.tmp_cache)
         lap("prepare.sandbox")
         # The git snapshot reads the real tree, which the shadow run never writes, so it runs alongside the run.
         # It must start after the base walk and end before the post walk: then every entry it reads was
@@ -235,6 +237,7 @@ class Pipeline:
         ws_eff = extract("workspace", ws_root, run.ws_up, prep.ws_base)
         tmp_eff = extract("tmp", run.tmp_lower, run.tmp_up, prep.tmp.base_fps, skip=prep.tmp_skip,
                           seq_start=len(ws_eff.ops))
+        self.tmp_cache.give(run.tmp_lower, prep.tmp.reusable)  # its sandbox has exited and extract was its last use
         lap("judge.extract")
         annotate(ws_eff.entries, snap, policy, self.store.ledger(session_id, str(ws_root)), ws_eff.contents,
                  blob_exists=lambda shas: gitstate.objects_exist(ws_root, shas))

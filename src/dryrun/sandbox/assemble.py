@@ -13,7 +13,7 @@ from dryrun.fingerprint import Fp, fingerprint_tree
 from dryrun.runpaths import RunPaths
 from dryrun.sandbox.decoys import make_decoys, new_token
 from dryrun.sandbox.layout import OverlaySpec, SandboxSpec, existing
-from dryrun.sandbox.tmpsnap import TmpSnapshot, snapshot_tmp
+from dryrun.sandbox.tmpsnap import TmpLowerCache, TmpSnapshot, snapshot_tmp
 
 HOST_ENV_DROP = {"SSH_AUTH_SOCK", "DBUS_SESSION_BUS_ADDRESS", "WSL_INTEROP", "DISPLAY", "WAYLAND_DISPLAY",
                  "XDG_RUNTIME_DIR", "GPG_AGENT_INFO", "SSH_AGENT_PID", "PULSE_SERVER"}
@@ -51,8 +51,10 @@ def _inside(child: Path, parent: Path) -> bool:
 
 
 def prepare(run: RunPaths, *, ws_root: Path, cwd: Path, command: str, env: dict[str, str], cfg: Config,
-            home: Path, state: Path, bwrap: str, lap=lambda name: None) -> Prepared:
-    """lap(name), if given, is called after each costly step (the pipeline's sub-stage timers)."""
+            home: Path, state: Path, bwrap: str, lap=lambda name: None, tmp_cache: TmpLowerCache | None = None
+            ) -> Prepared:
+    """lap(name), if given, is called after each costly step (the pipeline's sub-stage timers). tmp_cache, if
+    given, lends a finished run's /tmp lower to refresh instead of copying /tmp from scratch."""
     run.create()
     ws_root, home = Path(ws_root), Path(home)
     # Overlay upper roots start at 0700. Match their lower roots so an explicit
@@ -63,8 +65,9 @@ def prepare(run: RunPaths, *, ws_root: Path, cwd: Path, command: str, env: dict[
     s = cfg.shadow
     tmp_root = Path("/tmp")
     exclude = ws_root if _inside(ws_root, tmp_root) else None
+    reuse = tmp_cache.take(run.tmp_lower) if tmp_cache is not None else None
     tmp = snapshot_tmp(run.tmp_lower, tmp_root, max_entries=s.tmp_max_entries, max_total=s.tmp_max_total,
-                       max_file=s.tmp_max_file, exclude=exclude)
+                       max_file=s.tmp_max_file, exclude=exclude, reuse=reuse)
     lap("prepare.tmp_snapshot")
     os.chmod(run.tmp_lower, stat.S_IMODE(os.lstat(tmp_root).st_mode))
     os.chmod(run.tmp_up, stat.S_IMODE(os.lstat(tmp_root).st_mode))
