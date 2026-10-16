@@ -9,6 +9,7 @@ import os
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +39,12 @@ SCAN_LIMIT = 256 * 1024**2
 class Gate:
     ok: bool | None = None
     detail: str = "isolation self-test has not finished"
+
+
+def _timed(fn, *args):
+    t = time.monotonic()
+    out = fn(*args)
+    return out, int((time.monotonic() - t) * 1000)
 
 
 def _read_capped(path: Path, cap: int) -> bytes:
@@ -137,7 +144,8 @@ class Pipeline:
                             ["S.canary"]), None
         run = self.store.new_run()
         try:
-            return self._shadow(run, req, tri, ws_root, cwd, session_id, command, cancel, timings)
+            with ThreadPoolExecutor(2, thread_name_prefix="dryrun-shadow") as pool:
+                return self._shadow(pool, run, req, tri, ws_root, cwd, session_id, command, cancel, timings)
         except SandboxError as exc:
             self.store.finish(run, "failed")
             self.store.remove_run(run)
@@ -190,14 +198,18 @@ class Pipeline:
         return Decision("allow", "commit", "read-only git command, run in the read-only sandbox; output replayed",
                         run_id=run.run_id, token=token)
 
-    def _shadow(self, run: RunPaths, req: dict, tri, ws_root: Path, cwd: Path, session_id: str, command: str,
-                cancel: threading.Event | None, timings: dict) -> tuple[Decision, dict]:
+    def _shadow(self, pool: ThreadPoolExecutor, run: RunPaths, req: dict, tri, ws_root: Path, cwd: Path,
+                session_id: str, command: str, cancel: threading.Event | None, timings: dict) -> tuple[Decision, dict]:
         cfg, policy = self.cfg, self.cfg.policy
         last, totals = time.monotonic(), {}
 
-        def lap(name: str) -> None:
-            """ms since the previous lap; `stage.sub` laps also add up to the stage key (prepare, judge)."""
+        def lap(name: str, ms: int | None = None) -> None:
+            """ms since the previous lap; `stage.sub` laps also add up to the stage key (prepare, judge). A
+            step that ran concurrently with others reports its own ms, which is not added to the stage."""
             nonlocal last
+            if ms is not None:
+                timings[name] = ms
+                return
             now = time.monotonic()
             stage = name.partition(".")[0]
             totals[stage] = totals.get(stage, 0.0) + now - last
@@ -207,12 +219,18 @@ class Pipeline:
         prep = prepare(run, ws_root=ws_root, cwd=cwd, command=command, env=dict(req.get("env") or {}), cfg=cfg,
                        home=self.home, state=self.store.root, bwrap=self.bwrap, lap=lap)
         lap("prepare.sandbox")
-        snap = gitstate.snapshot(ws_root)
-        lap("prepare.git_snapshot")
+        # The git snapshot reads the real tree, which the shadow run never writes, so it runs alongside the run.
+        # It must start after the base walk and end before the post walk: then every entry it reads was
+        # stat'ed before and after, and any concurrent change to it sets lower_changed.
+        git_snap = pool.submit(_timed, gitstate.snapshot, ws_root)
+        base_digest = pool.submit(digest, prep.ws_base)  # only recorded in the ChangeSet
         res = run_shadow(prep.spec, run_id=run.run_id, out_dir=run.root, cfg=cfg.shadow, watch_fs=run.root,
                          cancel=cancel)
         lap("run")
-        lower_changed = digest(fingerprint_tree(ws_root)) != digest(prep.ws_base)
+        snap, ms = git_snap.result()
+        lap("prepare.git_snapshot", ms)
+        lap("judge.git_wait")
+        lower_changed = fingerprint_tree(ws_root) != prep.ws_base  # same check as comparing digests, no hashing
         lap("judge.fp_post")
         ws_eff = extract("workspace", ws_root, run.ws_up, prep.ws_base)
         tmp_eff = extract("tmp", run.tmp_lower, run.tmp_up, prep.tmp.base_fps, skip=prep.tmp_skip,
@@ -248,7 +266,7 @@ class Pipeline:
             cache_files=files, cache_bytes=size, git_is_repo=snap.is_repo, git=git, trace=trace,
             decoy_hits=decoy_hits, flags=flags)
         cs = ChangeSet(run_id=run.run_id, roots={"workspace": str(ws_root), "tmp": "/tmp"},
-                       base_digest=digest(prep.ws_base), ops=ws_eff.ops + tmp_eff.ops,
+                       base_digest=base_digest.result(), ops=ws_eff.ops + tmp_eff.ops,
                        refused=ws_eff.refused + tmp_eff.refused)
         contents = ws_eff.contents
         hits = evaluate(record, policy,

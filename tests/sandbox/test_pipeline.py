@@ -55,7 +55,7 @@ def test_allow_commit_round_trip(env):
     assert (d.decision, d.mode) == ("allow", "commit") and d.token, d.reason
     timings = json.loads(p.store.log_path.read_text().splitlines()[-1])["timings_ms"]
     assert set(timings) == {"triage", "prepare", "prepare.fp_pre", "prepare.tmp_snapshot", "prepare.sandbox",
-                            "prepare.git_snapshot", "run", "judge",
+                            "prepare.git_snapshot", "run", "judge", "judge.git_wait",
                             "judge.fp_post", "judge.extract", "judge.annotate", "judge.git_effects",
                             "judge.scan", "judge.decide"}
     assert not (ws / "out.txt").exists()
@@ -204,7 +204,8 @@ def test_apply_refuses_target_edited_in_place_after_review(env):
 def test_tmp_change_between_runs_is_seen(env):
     # C-0011: the shadow /tmp must never be stale, even when a file keeps its size and mtime.
     p, ws, home = env
-    d_tmp = Path(tempfile.mkdtemp(prefix="dryrun-test-", dir="/tmp"))
+    # "~" sorts last, so the depth-first copy visits this dir first, inside the entry cap of a busy /tmp.
+    d_tmp = Path(tempfile.mkdtemp(prefix="~dryrun-test-", dir="/tmp"))
     try:
         (d_tmp / "x").write_text("aaaa")
         d1 = ask(p, ws, home, f"cat {d_tmp}/x > out.txt")
@@ -214,6 +215,30 @@ def test_tmp_change_between_runs_is_seen(env):
         assert apply(p, d2)[0] == 0 and (ws / "out2.txt").read_text() == "bbbb"
     finally:
         shutil.rmtree(d_tmp, ignore_errors=True)
+
+
+def test_git_snapshot_is_taken_between_the_two_walks(env, monkeypatch):
+    # The git snapshot runs concurrently, but only inside the window the walks guard: if it read an entry
+    # before the base walk stat'ed it, a change in between would be in neither lower_changed nor the commit check.
+    import dryrun.sandbox.assemble as assemble_mod
+    p, ws, home = env
+    events = []
+
+    def wrap(name, fn):
+        def inner(*a, **kw):
+            events.append(name + ".start")
+            try:
+                return fn(*a, **kw)
+            finally:
+                events.append(name + ".end")
+        return inner
+
+    monkeypatch.setattr(assemble_mod, "fingerprint_tree", wrap("pre", assemble_mod.fingerprint_tree))
+    monkeypatch.setattr(pipeline_mod, "fingerprint_tree", wrap("post", pipeline_mod.fingerprint_tree))
+    monkeypatch.setattr(pipeline_mod.gitstate, "snapshot", wrap("git", pipeline_mod.gitstate.snapshot))
+    d = ask(p, ws, home, "echo x > y.txt")
+    assert d.decision == "allow", d.reason
+    assert events.index("pre.end") < events.index("git.start") < events.index("git.end") < events.index("post.start")
 
 
 def test_pipeline_parallel_runs_are_independent(env):
