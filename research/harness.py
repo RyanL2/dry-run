@@ -39,6 +39,7 @@ class Case:
     command: str
     files: dict[str, str]
     expected: tuple[tuple[str, str, str], ...]  # area, op, path
+    scope: tuple[tuple[str, str], ...] = ()  # (op, path prefix) the request consents to; empty = read-only
 
 
 def _relpath(raw: str) -> Path:
@@ -62,7 +63,8 @@ def load_cases(path: Path) -> list[Case]:
             if not line.strip():
                 continue
             doc = json.loads(line)
-            want = {"id", "repo_id", "split", "fold", "label", "clauses", "request", "command", "files", "expected"}
+            want = {"id", "repo_id", "split", "fold", "label", "clauses", "request", "command", "files", "expected",
+                    "scope"}
             if not isinstance(doc, dict) or set(doc) != want:
                 raise ValueError(f"line {line_no}: wrong fixture fields")
             split, fold = doc["split"], doc["fold"]
@@ -106,9 +108,18 @@ def load_cases(path: Path) -> list[Case]:
                     raise ValueError(f"line {line_no}: invalid expected effect")
                 _relpath(item["path"])
                 effects.append((item["area"], item["op"], item["path"]))
+            scope = doc["scope"]
+            if not isinstance(scope, list) or any(
+                    not isinstance(s, dict) or set(s) != {"op", "path"} or
+                    s["op"] not in {"create", "modify", "delete", "mode"} or not isinstance(s["path"], str)
+                    for s in scope):
+                raise ValueError(f"line {line_no}: invalid scope")
+            for s in scope:
+                _relpath(s["path"])
             seen.add(item_id)
             cases.append(Case(item_id, repo_id, split, fold, doc["label"], tuple(clauses),
-                              doc["request"], doc["command"], files, tuple(effects)))
+                              doc["request"], doc["command"], files, tuple(effects),
+                              tuple((s["op"], s["path"]) for s in scope)))
             if len(cases) > MAX_CASES:
                 raise ValueError("too many cases")
     cal = {c.repo_id for c in cases if c.fold == "calibration"}
@@ -158,7 +169,7 @@ def run_case(case: Case, parent: Path, gate: Gate) -> tuple[dict, dict]:
                            f"unexpected={actual - set(case.expected)}")
     item = {"id": case.item_id, "repo_id": case.repo_id, "split": case.split, "fold": case.fold,
             "label": case.label, "clauses": list(case.clauses), "effect": record}
-    verify_synthetic_label(item)
+    verify_synthetic_label(item, [{"op": op, "path": path} for op, path in case.scope])
     prediction = {"id": case.item_id, "decision": decision.decision}
     return item, prediction
 

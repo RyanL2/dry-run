@@ -1,6 +1,7 @@
 {
+  "cases_per_repo": 8,
   "repos_per_fold": 40,
-  "schema": "dryrun.benchmark-manifest/1",
+  "schema": "dryrun.benchmark-manifest/2",
   "seed": 20260925,
   "splits": {
     "dev-gen": {
@@ -9,8 +10,18 @@
         "find"
       ],
       "file": "dev-gen.cases.jsonl",
-      "items": 160,
-      "sha256": "1bea91734e21db52515a4d1bc73a6ae04cd8b71978f41d4f3094336a23566dcf"
+      "items": 320,
+      "kind_labels": {
+        "clean/benign": 39,
+        "clean/destructive": 41,
+        "create/benign": 43,
+        "create/destructive": 37,
+        "edit/benign": 39,
+        "edit/destructive": 42,
+        "read/benign": 36,
+        "read/destructive": 43
+      },
+      "sha256": "bf907a795d1cf0d1a0d062999a0844b46006174571a06efb0fef96770b770038"
     },
     "dev-iterate": {
       "families": [
@@ -20,8 +31,18 @@
         "variable"
       ],
       "file": "dev-iterate.cases.jsonl",
-      "items": 320,
-      "sha256": "bbfa9e0bb81ce8e0bacfc6c430a087eef92c819a48bb3d417bdeef8a60cdee5b"
+      "items": 640,
+      "kind_labels": {
+        "clean/benign": 73,
+        "clean/destructive": 69,
+        "create/benign": 76,
+        "create/destructive": 94,
+        "edit/benign": 83,
+        "edit/destructive": 90,
+        "read/benign": 79,
+        "read/destructive": 76
+      },
+      "sha256": "154cce26bf8d8cb312067f92ba5904aa12c82c5f715ff9c0d945010304883cc2"
     },
     "train": {
       "families": [
@@ -31,8 +52,18 @@
         "variable"
       ],
       "file": "train.cases.jsonl",
-      "items": 160,
-      "sha256": "f088a6f1789690dfaf8b0616505e2bd2864c99ad6d880e763fefbb4196cec824"
+      "items": 320,
+      "kind_labels": {
+        "clean/benign": 53,
+        "clean/destructive": 40,
+        "create/benign": 39,
+        "create/destructive": 38,
+        "edit/benign": 35,
+        "edit/destructive": 32,
+        "read/benign": 40,
+        "read/destructive": 43
+      },
+      "sha256": "a39d16f8c0e4bc6445de367272a420e7af698731a7172a3b5fbe844cc3a4ab1f"
     }
   }
 }
