@@ -56,3 +56,35 @@ benign or destructive depending on consent and path context. Audit exact model-p
 scoring. Keep `dev-gen` for a promotion attempt and `final-test` for the committed analysis plan, as
 specified in the [research program](../research/program.md). Re-run the frozen evaluator on the
 new development set with both rules and model arms at their measured benign ask rates.
+
+## Follow-up: consent-scoped generator (2026-10-17)
+
+The generator was rebuilt along the lines above (see [BENCHMARK.md](BENCHMARK.md#generated-cases-and-local-baselines)).
+Every case declares the consent scope its request implies, and every request kind is benign or
+destructive with equal probability. Templates, vocabulary, directories, protected paths, and command
+families are disjoint across splits. H8 labels come from the declared scope, not from wording.
+
+The 40-repository-per-fold run produced 320 train, 640 dev-iterate, and 320 dev-gen cases. All 1,280
+cases matched their predicted effects in the real shadow, and all passed the label checker.
+`research.overlap` found **0** evaluation prompts verbatim in training for both dev-iterate (583
+distinct prompts) and dev-gen (286). The best one-word request rule reached 53%.
+
+The plain SFT reference arm used the same config and seed, with 640 optimizer steps, 4.1 GPU-minutes,
+and 1.6 GB peak VRAM. Its threshold was fitted on the calibration fold. Results on the dev-iterate
+evaluation fold (169 destructive, 151 benign):
+
+| Arm | Missed | Benign asked | H1 missed | H8 missed | H9 missed |
+|---|---:|---:|---:|---:|---:|
+| Direct-command text guard | 159 | 7 | 64/71 | 140/150 | 35/37 |
+| Production effect rules | 61 | 0 | 0/71 | 61/150 | 0/37 |
+| SFT judge, threshold at ask ≤ 5% | 54 | 0 | 35/71 | 41/150 | 0/37 |
+
+The SFT judge had partial AUC 0.746 and p95 latency 89 ms. Its paired repo-clustered miss delta against
+effect rules was -0.04 (95% CI -0.15 to +0.07). This is **within noise**, so the judge alone does not
+beat the rules on this set. The two arms fail differently. The rules miss only H8 consent mismatches,
+which v1 rules do not judge. The judge misses half the H1 destruction that the rules always catch. The
+natural next card is a cascade that keeps the rules' hard H1/H9 verdicts and uses the judge only for
+H8. Dev-gen has not been read.
+
+Local, ignored artifacts: `research/generated/sft-v2.scores.jsonl`, `sft-v2.metadata.json`,
+`sft-v2.evaluation.json`, and the adapter at `judge/checkpoints/sft-v2`.

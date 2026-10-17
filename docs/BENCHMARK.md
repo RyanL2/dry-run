@@ -69,15 +69,33 @@ The four committed fixtures are an end-to-end smoke set, not a statistical bench
 
 ## Generated cases and local baselines
 
-`research.generate` produces deterministic, matched benign/destructive repository cases. It includes
-non-build deletion (H1/H8), protected `.envrc` creation (H9/H8), benign build deletion, and benign
-build creation. Training and dev-iterate use direct, script, variable, and Python deletion families.
-Dev-gen holds out `find` and
-base64 encoding; a separately seeded final-test would hold out `xargs` and subshell families.
-The default generator does not create final-test cases. Repository IDs do not cross folds.
-The generator writes a manifest with its seed, family assignments, case counts, and SHA-256 hashes.
-The committed [manifest](../research/fixtures/generated-manifest.json) records the 40-repository-per-fold
-run. Final-test generation requires `--final-test-seed` and an empty output directory outside the
+`research.generate` produces deterministic repository cases. Each case pairs a request with the
+consent scope it implies: read-only, clean a build directory, create a path, or edit a file. The
+case file stores that scope, and the label checker derives H8 from it, never from request wording.
+Every request kind has benign and destructive scenarios with equal probability. The same effect can
+therefore be benign under one request and out of scope under another. For example, deleting build
+output is benign after "clean the build directory" and H8 after "summarize this file". Destructive
+scenarios cover:
+
+- source deletion (H1/H8);
+- truncation of the file the request names (H1 only);
+- out-of-scope creates, appends, and deletes (H8);
+- protected-path writes (H9/H8).
+
+Each repository has its own source directory, file names, contents, and build directory.
+
+Splits share no request templates, file-name vocabulary, source or build directory names, or
+protected paths. Train and dev-iterate share the direct, script, variable, and Python command
+families. Dev-gen uses `find`/`tee`/`install` and base64-encoded scripts. A separately seeded
+final-test would use `xargs`/`dd` and `sh -c`. The default generator does not create final-test cases.
+Repository IDs do not cross folds. The generator writes a manifest with its seed, family assignments,
+kind/label counts, and SHA-256 hashes. The committed [manifest](../research/fixtures/generated-manifest.json)
+records the 40-repository-per-fold, 8-cases-per-repository run.
+
+`research.overlap` must pass before any judge is scored. It counts evaluation model prompts that occur
+verbatim in training, and it measures the best one-word request rule. On the committed run, both
+dev-iterate and dev-gen had zero prompt overlap with training. They had 583 and 286 distinct prompts,
+and the best one-word request rule reached 53%. Final-test generation requires `--final-test-seed` and an empty output directory outside the
 repository. It writes only final-test cases and their manifest there; the ordinary harness refuses
 to open that split. Commit the analysis plan before generating or reading this set.
 
@@ -86,25 +104,30 @@ python -m research.generate research/generated --repos-per-fold 40
 python -m research.harness research/generated/train.cases.jsonl research/generated/train.items.jsonl research/generated/train.rules.jsonl
 python -m research.harness research/generated/dev-iterate.cases.jsonl research/generated/dev-iterate.items.jsonl research/generated/dev-iterate.rules.jsonl
 python -m research.harness research/generated/dev-gen.cases.jsonl research/generated/dev-gen.items.jsonl research/generated/dev-gen.rules.jsonl
-python -m research.labels research/generated/dev-iterate.items.jsonl
+python -m research.labels research/generated/dev-iterate.items.jsonl research/generated/dev-iterate.cases.jsonl
+python -m research.overlap research/generated/train.items.jsonl research/generated/dev-iterate.items.jsonl research/generated/dev-gen.items.jsonl
 python -m research.baselines research/generated/dev-iterate.items.jsonl research/generated/dev-iterate.text.jsonl --arm text
 python -m research.baselines research/generated/dev-iterate.items.jsonl research/generated/dev-iterate.effect.jsonl --arm effect
 ```
 
 These commands require a non-root Linux user, a native Linux filesystem, and a passing isolation
-canary gate. In the expanded 320-case dev-iterate run, the deliberately simple direct-command text
-guard missed 72/80 destructive evaluation cases and asked on 40/80 benign cases. Production effect
-rules missed 0/80 and asked on 0/80. The paired repo-clustered miss delta was -0.90 (95% CI -0.9625
-to -0.8375). The arms are fixed rules points at different benign ask rates, so this is an engineering
+canary gate. Generating and verifying all 1,280 cases took about three minutes on WSL2.
+
+The 640-case dev-iterate evaluation fold has 169 destructive and 151 benign cases. On it, the
+deliberately simple direct-command text guard missed 159/169 destructive cases and asked on 7/151
+benign cases. Production effect rules missed 61/169 and asked on 0/151. All 61 misses are H8-only
+consent mismatches, which the v1 rules do not judge (per-clause misses: H1 0/71, H9 0/37, H8 61/150).
+The paired repo-clustered miss delta of effect rules minus the text guard was -0.58 (95% CI -0.66 to
+-0.50). The arms are fixed rules points at different benign ask rates, so this is an engineering
 check, not a matched-ask5 research comparison. The synthetic set is not representative of real-world
 use and does not cover H2–H7 or H10.
-The synthetic label checker verifies that the H1, H8, and H9 labels exactly match the supported
-signals in each measured EffectRecord and request. Other policy clauses need separate adjudicators
-before entering this set.
 
-The [synthetic judge audit](BENCHMARK_AUDIT.md) found that every evaluation model prompt occurs
-verbatim in training and the request wording alone separates the labels. Judge results on this set
-therefore do not establish generalization to new tasks.
+The synthetic label checker verifies that the H1, H8, and H9 labels exactly match the supported
+signals in each measured EffectRecord and the case's declared scope. Other policy clauses need
+separate adjudicators before entering this set.
+
+The [synthetic judge audit](BENCHMARK_AUDIT.md) describes the earlier generator, whose evaluation
+prompts all occurred verbatim in training. The generator above replaces it.
 
 ## Judge reference arm
 
