@@ -9,6 +9,7 @@ import os
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from dryrun.runpaths import RunPaths
 from dryrun.sandbox.assemble import filter_env, prepare
 from dryrun.sandbox.decoys import scan
 from dryrun.sandbox.spawn import SandboxError, run_readonly_command, run_shadow
+from dryrun.sandbox.tmpsnap import TmpLowerCache
 from dryrun.sandbox.trace import parse_trace_file
 from dryrun.store import Store, TokenError
 from dryrun.triage import classify
@@ -38,6 +40,12 @@ SCAN_LIMIT = 256 * 1024**2
 class Gate:
     ok: bool | None = None
     detail: str = "isolation self-test has not finished"
+
+
+def _timed(fn, *args):
+    t = time.monotonic()
+    out = fn(*args)
+    return out, int((time.monotonic() - t) * 1000)
 
 
 def _read_capped(path: Path, cap: int) -> bytes:
@@ -56,6 +64,7 @@ class Pipeline:
         self.gate = gate or Gate()
         self.home = Path(home) if home is not None else Path.home()
         self.bwrap = bwrap or str(bwrap_path())
+        self.tmp_cache = TmpLowerCache(store.root / "tmp-lowers")
 
     # --- public ----------------------------------------------------------------------------------
     def handle_prompt(self, session_id: str, text: str) -> None:
@@ -137,7 +146,8 @@ class Pipeline:
                             ["S.canary"]), None
         run = self.store.new_run()
         try:
-            return self._shadow(run, req, tri, ws_root, cwd, session_id, command, cancel, timings)
+            with ThreadPoolExecutor(1, thread_name_prefix="dryrun-git") as pool:
+                return self._shadow(pool, run, req, tri, ws_root, cwd, session_id, command, cancel, timings)
         except SandboxError as exc:
             self.store.finish(run, "failed")
             self.store.remove_run(run)
@@ -190,26 +200,49 @@ class Pipeline:
         return Decision("allow", "commit", "read-only git command, run in the read-only sandbox; output replayed",
                         run_id=run.run_id, token=token)
 
-    def _shadow(self, run: RunPaths, req: dict, tri, ws_root: Path, cwd: Path, session_id: str, command: str,
-                cancel: threading.Event | None, timings: dict) -> tuple[Decision, dict]:
+    def _shadow(self, pool: ThreadPoolExecutor, run: RunPaths, req: dict, tri, ws_root: Path, cwd: Path,
+                session_id: str, command: str, cancel: threading.Event | None, timings: dict) -> tuple[Decision, dict]:
         cfg, policy = self.cfg, self.cfg.policy
-        t = time.monotonic()
+        last, totals = time.monotonic(), {}
+
+        def lap(name: str, ms: int | None = None) -> None:
+            """ms since the previous lap; `stage.sub` laps also add up to the stage key (prepare, judge). A
+            step that ran concurrently with others reports its own ms, which is not added to the stage."""
+            nonlocal last
+            if ms is not None:
+                timings[name] = ms
+                return
+            now = time.monotonic()
+            stage = name.partition(".")[0]
+            totals[stage] = totals.get(stage, 0.0) + now - last
+            timings[name], timings[stage] = int((now - last) * 1000), int(totals[stage] * 1000)
+            last = now
+
         prep = prepare(run, ws_root=ws_root, cwd=cwd, command=command, env=dict(req.get("env") or {}), cfg=cfg,
-                       home=self.home, state=self.store.root, bwrap=self.bwrap)
-        snap = gitstate.snapshot(ws_root)
-        timings["prepare"] = int((time.monotonic() - t) * 1000)
-        t = time.monotonic()
+                       home=self.home, state=self.store.root, bwrap=self.bwrap, lap=lap, tmp_cache=self.tmp_cache)
+        lap("prepare.sandbox")
+        # The git snapshot reads the real tree, which the shadow run never writes, so it runs alongside the run.
+        # It must start after the base walk and end before the post walk: then every entry it reads was
+        # stat'ed before and after, and any concurrent change to it sets lower_changed.
+        git_snap = pool.submit(_timed, gitstate.snapshot, ws_root)
         res = run_shadow(prep.spec, run_id=run.run_id, out_dir=run.root, cfg=cfg.shadow, watch_fs=run.root,
                          cancel=cancel)
-        timings["run"] = int((time.monotonic() - t) * 1000)
-        t = time.monotonic()
-        lower_changed = digest(fingerprint_tree(ws_root)) != digest(prep.ws_base)
+        lap("run")
+        snap, ms = git_snap.result()
+        lap("prepare.git_snapshot", ms)
+        lap("judge.git_wait")
+        lower_changed = fingerprint_tree(ws_root) != prep.ws_base  # same check as comparing digests, no hashing
+        lap("judge.fp_post")
         ws_eff = extract("workspace", ws_root, run.ws_up, prep.ws_base)
         tmp_eff = extract("tmp", run.tmp_lower, run.tmp_up, prep.tmp.base_fps, skip=prep.tmp_skip,
                           seq_start=len(ws_eff.ops))
+        self.tmp_cache.give(run.tmp_lower, prep.tmp.reusable)  # its sandbox has exited and extract was its last use
+        lap("judge.extract")
         annotate(ws_eff.entries, snap, policy, self.store.ledger(session_id, str(ws_root)), ws_eff.contents,
                  blob_exists=lambda shas: gitstate.objects_exist(ws_root, shas))
+        lap("judge.annotate")
         git = git_effects(ws_root, run, ws_eff.entries) if snap.is_repo else {}
+        lap("judge.git_effects")
         trace = parse_trace_file(res.trace_path)
         stdout = _read_capped(res.stdout_path, cfg.shadow.output_max)
         stderr = _read_capped(res.stderr_path, cfg.shadow.output_max)
@@ -222,8 +255,10 @@ class Pipeline:
                 budget -= len(data)
                 blobs[f"{area}/{rel}"] = data
         decoy_hits = scan(prep.token, blobs)
+        lap("judge.scan")
         flags = compute_flags(res=res, trace=trace, ws_eff=ws_eff, tmp_eff=tmp_eff, lower_changed=lower_changed,
-                              tmp_partial=prep.tmp.partial, output=stdout + stderr)
+                              tmp_partial=prep.tmp.partial, output=stdout + stderr,
+                              fsize_max=cfg.shadow.file_size_max)
         files, size = cache_counts(prep.caches)
         request = self.store.get_request(session_id)
         record = build_record(
@@ -239,7 +274,7 @@ class Pipeline:
         hits = evaluate(record, policy,
                         read=lambda rel: _read_capped(contents[rel], 1 << 20) if rel in contents else None)
         decision = decide("shadow", rec=record, hits=hits, judge=self.judge)
-        timings["judge"] = int((time.monotonic() - t) * 1000)
+        lap("judge.decide")
         record_json = record.to_json()
         decision.run_id = run.run_id
         if decision.mode == "commit" and decision.decision in ("allow", "ask"):

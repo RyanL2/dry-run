@@ -6,6 +6,7 @@ import subprocess
 import threading
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -59,6 +60,29 @@ def test_cancel_event_stops_run(ws, run_dir, shadow_cfg):
     threading.Timer(0.5, ev.set).start()
     res = shadow(ws, run_dir, shadow_cfg, "sleep 20", cancel=ev)
     assert res.killed_reason == "cancelled"
+
+
+def test_file_size_limit_kill_is_classified(ws, run_dir, shadow_cfg):
+    cfg = replace(shadow_cfg, file_size_max=1 << 20)
+    res = shadow(ws, run_dir, cfg, "head -c 4M /dev/zero > big")
+    assert res.killed_reason == "fsize"
+
+
+def test_disk_watchdog_stops_inode_exhaustion(ws, run_dir, shadow_cfg, monkeypatch):
+    import dryrun.sandbox.spawn as spawn_mod
+    real, calls = os.statvfs, []
+
+    def statvfs(path):
+        v = real(path)
+        calls.append(path)
+        if len(calls) < 2:
+            return v
+        return SimpleNamespace(f_bavail=v.f_bavail, f_frsize=v.f_frsize, f_blocks=v.f_blocks,
+                               f_files=1000, f_favail=10)                # 1% of the inodes left
+
+    monkeypatch.setattr(spawn_mod.os, "statvfs", statvfs)
+    res = shadow(ws, run_dir, shadow_cfg, "sleep 5")
+    assert res.killed_reason == "disk"
 
 
 def test_setup_failure_raises_sandbox_error(ws, run_dir, shadow_cfg):

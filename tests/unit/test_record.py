@@ -73,6 +73,19 @@ def test_truncated_trace_flags_resource_limit():
     assert flags == ["resource_limit"]
 
 
+def test_file_at_size_limit_is_resource_limit(tmp_path: Path):
+    """SIGXFSZ is invisible when the writer is not the last command (`head -c 2G /dev/zero > big; true`
+    exits 0), so a written file that reached the limit marks the output as truncated."""
+    ws = AreaEffect(entries=[FsEntry(op="create", path="big", kind="file", preexisting=False, bytes_after=1024)])
+    flags = compute_flags(res=None, trace=TraceSummary(), ws_eff=ws, tmp_eff=AreaEffect(), lower_changed=False,
+                          tmp_partial=False, output=b"", fsize_max=1024)
+    assert "resource_limit" in flags
+    res = SpawnResult(exit_code=153, wall_ms=10, timed_out=False, killed_reason="fsize",
+                      stdout_path=tmp_path / "o", stderr_path=tmp_path / "e", trace_path=tmp_path / "t")
+    assert compute_flags(res=res, trace=TraceSummary(), ws_eff=AreaEffect(), tmp_eff=AreaEffect(),
+                         lower_changed=False, tmp_partial=False, output=b"") == ["resource_limit"]
+
+
 def test_git_effects_classifies_internals_and_refs(tmp_path: Path):
     ws = tmp_path / "ws"
     (ws / ".git" / "refs" / "heads").mkdir(parents=True)

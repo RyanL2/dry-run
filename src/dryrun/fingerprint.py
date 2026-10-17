@@ -1,22 +1,68 @@
-"""lstat fingerprints of directory trees (racy-git style, ctime included) and mount checks."""
+"""lstat fingerprints of directory trees (ctime included, racy entries marked) and mount checks."""
 from __future__ import annotations
 
 import hashlib
+import itertools
 import os
+import re
 import stat
+import time
 from pathlib import Path
 
 Fp = tuple[int, int, int, int, int]
+# Filesystems that get multigrain timestamps in Linux 6.13+: once a stat has seen an inode's ctime, the
+# next change to that inode gets a strictly later ctime. Probed on WSL2 6.18 ext4 and tmpfs: 0 of 20,000
+# same-size rewrites right after a stat kept the fingerprint (research/cards/C-0009.md).
+MULTIGRAIN_FS = frozenset({"ext4", "xfs", "btrfs", "tmpfs"})
+# Elsewhere ctime comes from a clock-tick coarse clock (<= 10 ms at HZ=100), and a change in the same tick as
+# our stat can leave the whole fingerprint equal (git's "racy" entries). Such recent entries are marked.
+RACY_NS = 50_000_000
+_racy = itertools.count(1)
 
 
 def fp_of(st: os.stat_result) -> Fp:
     return (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_mode)
 
 
+def fstype(path: Path, mountinfo: str | None = None) -> str:
+    """Filesystem type of the mount that holds path (longest mount point that contains it)."""
+    if mountinfo is None:
+        with open("/proc/self/mountinfo", encoding="utf-8", errors="surrogateescape") as f:
+            mountinfo = f.read()
+    path, best, kind = str(path), "", ""
+    for line in mountinfo.splitlines():
+        left, _, right = line.partition(" - ")
+        parts = left.split(" ")
+        if len(parts) > 4 and right:
+            point = _unescape_mount(parts[4])
+            if (path == point or path.startswith(point.rstrip("/") + "/")) and len(point) >= len(best):
+                best, kind = point, right.split(" ")[0]
+    return kind
+
+
+def multigrain_ctime(root: Path, release: str | None = None, mountinfo: str | None = None) -> bool:
+    m = re.match(r"(\d+)\.(\d+)", release if release is not None else os.uname().release)
+    return bool(m) and (int(m[1]), int(m[2])) >= (6, 13) and fstype(root, mountinfo) in MULTIGRAIN_FS
+
+
+def racy_cutoff(root: Path) -> int | None:
+    """ctime_ns from which an entry under root is racy, or None when the filesystem makes that impossible."""
+    return None if multigrain_ctime(root) else time.time_ns() - RACY_NS
+
+
+def observe(st: os.stat_result, cutoff: int | None) -> Fp:
+    """fp_of, except that a racy entry gets a unique negative ctime: it then never matches any other
+    observation, so lower_changed and the commit conflict check treat it as changed (safe, may re-ask)."""
+    if cutoff is not None and st.st_ctime_ns >= cutoff:
+        return (st.st_ino, st.st_size, st.st_mtime_ns, -next(_racy), st.st_mode)
+    return fp_of(st)
+
+
 def fingerprint_tree(root: Path) -> dict[str, Fp]:
     """Every path under root mapped to its lstat fingerprint. Never follows symlinks and does not
-    descend into mount points (the mount point itself is recorded)."""
+    descend into mount points (the mount point itself is recorded). Racy entries never compare equal."""
     root = Path(root)
+    cutoff = racy_cutoff(root)
     root_dev = os.lstat(root).st_dev
     out: dict[str, Fp] = {}
     stack = [""]
@@ -33,7 +79,7 @@ def fingerprint_tree(root: Path) -> dict[str, Fp]:
                     st = entry.stat(follow_symlinks=False)
                 except FileNotFoundError:
                     continue
-                out[child] = fp_of(st)
+                out[child] = observe(st, cutoff)
                 if stat.S_ISDIR(st.st_mode) and st.st_dev == root_dev:
                     stack.append(child)
     return out
