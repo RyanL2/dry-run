@@ -2,7 +2,8 @@
 
 > Decide from **observed effects** before an agent's command touches real files.
 > Status: sub-project 1 (core) implemented as v0.1 on 2026-09-23. All 16 isolation canaries pass on WSL2
-> 6.18 (`dryrun doctor`). Sub-projects 2 (benchmark) and 3 (judge model) are next.
+> 6.18 (`dryrun doctor`). Benchmark and judge reference components are under research development;
+> see [benchmark status](BENCHMARK.md).
 > Companion documents: [design spec](superpowers/specs/2026-09-22-dry-run-core-design.md) ·
 > [harm policy](harm-policy.md) · [research notes (facts)](research-notes.md) ·
 > [research program](../research/program.md) · [experiment cards](../research/cards/).
@@ -476,8 +477,8 @@ flowchart LR
 - **Sub-project 1 uses the loop by hand:** cards plus a ledger for the sandbox-performance track
   (C-0001–C-0003). The monitor, the frozen evaluator and the automatic promotion gate are built at the
   start of sub-project 2, because they need the benchmark.
-- **Dogfooding:** a Dry Run H9-style rule protects `research/frozen/**` from the agent that runs the
-  experiments.
+- **Dogfooding:** the opt-in [repository policy](../.dryrun/policy.yaml) protects
+  `research/frozen/**` and the evaluator lock while its daemon is running.
 
 ## 13. Roadmap (engineering features, each with a trigger)
 
