@@ -127,7 +127,7 @@ flowchart LR
 | `rpc` | NDJSON over `$XDG_RUNTIME_DIR/dryrun.sock`, per-request deadline | asyncio | hook |
 | `triage` | Parse with tree-sitter-bash; classify `read_only` / `git_read` / `apply` / `non_shadowable` / `long_running` / `shadow` | tree-sitter-bash | daemon |
 | `sandbox` | Build and run the bwrap invocation; collect raw artifacts | vendored bwrap ≥ 0.11.1, strace | effects |
-| `fingerprint` | Stat-walk `(ino,size,mtime_ns,ctime_ns,mode)`; racy-mtime hashing | os | sandbox, commit |
+| `fingerprint` | Stat-walk `(ino,size,mtime_ns,ctime_ns,mode)`; racy entries (ctime within 50 ms, without Linux 6.13+ multigrain ctime) never compare equal | os | sandbox, commit |
 | `effects` | Upper dir → `ChangeSet` (noise-filtered) + `EffectRecord` | fingerprint, gitstate | judge, commit |
 | `gitstate` | Per-path recoverability (`tracked_clean`/`tracked_dirty`/`untracked`/`ignored`), ref snapshot | git CLI | effects |
 | `judge` | Cascade: hard rules → soft rules → model slot; one templated reason | policy.yaml | daemon |
@@ -192,8 +192,9 @@ sequenceDiagram
     CC->>HK: PreToolUse Bash {command, cwd, session_id}
     HK->>D: pretool(..., deadline_ms)
     D->>D: triage → shadow
-    D->>FS: fingerprint base (stat walk), git status
+    D->>FS: fingerprint base (stat walk)
     D->>SB: run command in overlays of workspace, /tmp, scratch HOME, with no net
+    D->>FS: git status (alongside the run, before the re-fingerprint)
     SB-->>D: upper dirs, exit code, stdout/stderr, strace log
     D->>FS: re-fingerprint (lower unchanged?)
     D->>D: effects → ChangeSet + EffectRecord → judge = allow
@@ -233,7 +234,7 @@ flowchart TB
     subgraph NS["bwrap: new user, mount, pid, net, ipc, uts, cgroup namespaces; cap-drop ALL; no_new_privs; new session; die-with-parent"]
         ROOT["/ : recursive read-only bind of host root<br/>(covers /mnt/c, /usr/lib/wsl; verified by canary)"]
         WS["$WORKSPACE : overlay<br/>lower = real workspace<br/>upper = runs/id/ws.up on the SAME fs"]
-        TMP["/tmp : overlay<br/>lower = copied snapshot of own files in real /tmp<br/>(real /tmp has locked submounts), upper = runs/id/tmp.up"]
+        TMP["/tmp : overlay<br/>lower = copied snapshot of own files in real /tmp, refreshed from the last run's copy<br/>(real /tmp has locked submounts), upper = runs/id/tmp.up"]
         HIDE["tmpfs over: /run, /var/run, /mnt/wslg, /mnt/wsl, /tmp/.X11-unix,<br/>$XDG_RUNTIME_DIR, Dry Run state dir, ~/.claude"]
         HOMEX["real $HOME : read-only, $HOME unchanged (toolchains keep working)<br/>writes fail with EROFS → flag ro_write_blocked → H2"]
         SHOME["existing cache dirs (~/.cache, ~/.npm, …) : overlays<br/>diffs counted, never committed"]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -54,7 +55,7 @@ def test_allow_commit_round_trip(env):
     assert (d.decision, d.mode) == ("allow", "commit") and d.token, d.reason
     timings = json.loads(p.store.log_path.read_text().splitlines()[-1])["timings_ms"]
     assert set(timings) == {"triage", "prepare", "prepare.fp_pre", "prepare.tmp_snapshot", "prepare.sandbox",
-                            "prepare.git_snapshot", "run", "judge",
+                            "prepare.git_snapshot", "run", "judge", "judge.git_wait",
                             "judge.fp_post", "judge.extract", "judge.annotate", "judge.git_effects",
                             "judge.scan", "judge.decide"}
     assert not (ws / "out.txt").exists()
@@ -159,6 +160,85 @@ def test_pipeline_lower_changed(env):
     threading.Timer(1.0, lambda: (ws / "keep.txt").write_text("edited by user\n")).start()
     d = ask(p, ws, home, "sleep 2; echo x > y.txt")
     assert (d.decision, d.mode) == ("ask", "rerun")
+
+
+def _rewrite_keeping_mtime(path: Path, data: bytes) -> None:
+    st = os.lstat(path)
+    with open(path, "r+b") as f:
+        f.write(data)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+
+def test_pipeline_lower_changed_same_size_edit_with_restored_mtime(env):
+    # C-0009: a concurrent in-place edit that forges mtime back must still be seen (ctime moves).
+    p, ws, home = env
+    threading.Timer(1.0, _rewrite_keeping_mtime, (ws / "keep.txt", b"KEEP")).start()
+    d = ask(p, ws, home, "sleep 2; echo x > y.txt")
+    assert (d.decision, d.mode) == ("ask", "rerun")
+
+
+def test_pipeline_lower_changed_rename_over(env):
+    p, ws, home = env
+
+    def save():
+        st = os.lstat(ws / "keep.txt")
+        (ws / "keep.new").write_text("KEEP\n")
+        os.utime(ws / "keep.new", ns=(st.st_atime_ns, st.st_mtime_ns))
+        os.replace(ws / "keep.new", ws / "keep.txt")
+
+    threading.Timer(1.0, save).start()
+    d = ask(p, ws, home, "sleep 2; echo x > y.txt")
+    assert (d.decision, d.mode) == ("ask", "rerun")
+
+
+def test_apply_refuses_target_edited_in_place_after_review(env):
+    p, ws, home = env
+    d = ask(p, ws, home, "echo shadow > keep.txt")
+    assert (d.decision, d.mode) == ("allow", "commit"), d.reason
+    _rewrite_keeping_mtime(ws / "keep.txt", b"KEEP")
+    code, _, _ = apply(p, d)
+    assert code == 4
+    assert (ws / "keep.txt").read_text() == "KEEP\n"
+
+
+def test_tmp_change_between_runs_is_seen(env):
+    # C-0011: the shadow /tmp must never be stale, even when a file keeps its size and mtime.
+    p, ws, home = env
+    # "~" sorts last, so the depth-first copy visits this dir first, inside the entry cap of a busy /tmp.
+    d_tmp = Path(tempfile.mkdtemp(prefix="~dryrun-test-", dir="/tmp"))
+    try:
+        (d_tmp / "x").write_text("aaaa")
+        d1 = ask(p, ws, home, f"cat {d_tmp}/x > out.txt")
+        assert apply(p, d1)[0] == 0 and (ws / "out.txt").read_text() == "aaaa"
+        _rewrite_keeping_mtime(d_tmp / "x", b"bbbb")
+        d2 = ask(p, ws, home, f"cat {d_tmp}/x > out2.txt")
+        assert apply(p, d2)[0] == 0 and (ws / "out2.txt").read_text() == "bbbb"
+    finally:
+        shutil.rmtree(d_tmp, ignore_errors=True)
+
+
+def test_git_snapshot_is_taken_between_the_two_walks(env, monkeypatch):
+    # The git snapshot runs concurrently, but only inside the window the walks guard: if it read an entry
+    # before the base walk stat'ed it, a change in between would be in neither lower_changed nor the commit check.
+    import dryrun.sandbox.assemble as assemble_mod
+    p, ws, home = env
+    events = []
+
+    def wrap(name, fn):
+        def inner(*a, **kw):
+            events.append(name + ".start")
+            try:
+                return fn(*a, **kw)
+            finally:
+                events.append(name + ".end")
+        return inner
+
+    monkeypatch.setattr(assemble_mod, "fingerprint_tree", wrap("pre", assemble_mod.fingerprint_tree))
+    monkeypatch.setattr(pipeline_mod, "fingerprint_tree", wrap("post", pipeline_mod.fingerprint_tree))
+    monkeypatch.setattr(pipeline_mod.gitstate, "snapshot", wrap("git", pipeline_mod.gitstate.snapshot))
+    d = ask(p, ws, home, "echo x > y.txt")
+    assert d.decision == "allow", d.reason
+    assert events.index("pre.end") < events.index("git.start") < events.index("git.end") < events.index("post.start")
 
 
 def test_pipeline_parallel_runs_are_independent(env):
